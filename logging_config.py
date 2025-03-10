@@ -3,12 +3,12 @@ from logging.handlers import RotatingFileHandler
 
 # Configuration of logging
 formatter = logging.Formatter(
-		'[%(levelname)-8s %(asctime)s] %(name)s: %(message)s')
+        '[%(levelname)-8s %(asctime)s] %(name)s: %(message)s')
 rotating_handler = RotatingFileHandler(
-		filename='chexplore.log',
-		mode='a',
-		maxBytes=1024*1024,
-		backupCount=8)
+        filename='chexplore.log',
+        mode='a',
+        maxBytes=1024*1024,
+        backupCount=8)
 rotating_handler.setFormatter(formatter)
 
 # Configuration of root logger
