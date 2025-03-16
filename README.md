@@ -33,4 +33,4 @@ A tool module for exploring and managing Telegram groups and channels. Provides 
 A utility module for extracting data from Telegram groups and channels and saving it in `pandas.DataFrame` data frames. Features include:
 * Downloading dialogs, channels and groups in which the user participates, as well as detailed information about channels and their participants.
 * Managing asynchronous downloading of large amounts of data.
-* Converting data to pandas data frames and performing necessary data cleaning and cleaning.
+* Converting data to pandas data frames and performing necessary data wrangling and cleaning.
