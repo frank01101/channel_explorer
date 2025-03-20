@@ -23,7 +23,7 @@ The currently supported instant messaging service is Telegram but more services 
 #### tgread.py
 A tool module for exploring and managing Telegram groups and channels. Provides a comprehensive set of tools for interacting with the Telegram API using the Telethon library. Features include:
 * Downloading dialogues, channels and groups that the user is participating in.
-* Downloading detailed information about channels and their users.
+* Downloading detailed information about channels and their users, with the optimalization of fetch time by adapting to the flood wait limitations without exceeding them.
 * Handling messages, including downloading and filtering by content.
 
 ### chdata
