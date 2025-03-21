@@ -23,6 +23,11 @@ Requirements:
     - Telegram API credentials (API_ID, API_HASH) from my.telegram.org
 """
 
+__author__ = 'Franciszek Humieja'
+__copyright__ = 'Copyright 2025, Franciszek Humieja'
+__license__ = 'MIT'
+__version__ = '0.0.0'
+
 import asyncio
 import logging
 

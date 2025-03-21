@@ -21,6 +21,11 @@ Requirements:
     - tgread.py module
 """
 
+__author__ = 'Franciszek Humieja'
+__copyright__ = 'Copyright 2025, Franciszek Humieja'
+__license__ = 'MIT'
+__version__ = '1.0.0'
+
 import pandas as pd
 import asyncio
 import logging
