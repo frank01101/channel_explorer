@@ -200,3 +200,4 @@ debug_*.py
 log_state.txt
 plan/
 show_log.sh
+*.json
