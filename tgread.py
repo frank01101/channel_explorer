@@ -24,9 +24,9 @@ Requirements:
 """
 
 __author__ = 'Franciszek Humieja'
-__copyright__ = 'Copyright 2025, Franciszek Humieja'
+__copyright__ = 'Copyright (c) 2025 Franciszek Humieja'
 __license__ = 'MIT'
-__version__ = '0.0.0'
+__version__ = '1.0.0'
 
 import asyncio
 import logging
@@ -94,6 +94,7 @@ class TelegramReader:
     """
 
     def __init__(self, session_name: str, api_id: int, api_hash: str):
+        self._session_name = session_name
         self.client = TelegramClient(
                 session=session_name, api_id=api_id, api_hash=api_hash)
         # Telethon's automatic flood wait (24*60*60 means always).
@@ -165,7 +166,9 @@ class TelegramReader:
                         channels.append(dialog.entity)
         except Exception as e:
             await self._log_error(error=e, context='fetching channels')
-        logger.info(f'Retrieved {len(channels)} channels/groups.')
+        logger.info(
+                f'{self._session_name}: Retrieved {len(channels)} '
+                'channels/groups.')
         return channels
 
     async def get_full_channels(self, *dialogs: EntityLike) -> list[ChatFull]:
@@ -227,9 +230,10 @@ class TelegramReader:
                     len(dialogs)//self._full_channels_batch
                     *self._full_channels_delay)
             logger.info(
-                    f'Started fetching full information for {len(dialogs)} '
-                    f'chats/channels. It will take more than {wait_time}s '
-                    'for this batch to be fetched, due to flood wait...')
+                    f'{self._session_name}: Started fetching full '
+                    f'information for {len(dialogs)} chats/channels. It '
+                    f'will take more than {wait_time}s for this batch to '
+                    'be fetched, due to flood wait...')
         async with asyncio.TaskGroup() as tg:
             fetch_tasks = [
                     tg.create_task(get_single_full_channel(dialog))
@@ -237,7 +241,7 @@ class TelegramReader:
         full_channels = [task.result() for task in fetch_tasks]
         failed_count = sum(channel is None for channel in full_channels)
         logger.info(
-                'Retrieved full information for '
+                f'{self._session_name}: Retrieved full information for '
                 f'{len(full_channels)-failed_count} '
                 f'and failed for {failed_count} channels/groups.')
         return full_channels
@@ -317,7 +321,8 @@ class TelegramReader:
             await self._log_error(
                     error=e, context='fetching new messages', dialog=dialog)
         logger.info(
-                (f'Search for ”{search}“: '
+                f'{self._session_name}: '
+                + (f'Search for ”{search}“: '
                 if isinstance(search, str) and search else '')
                 + f'Retrieved {len(messages) - edited_count} new and '
                 f'{edited_count} updated messages from the dialog.')
@@ -351,7 +356,8 @@ class TelegramReader:
             messages = await self.client.get_messages(
                     entity=dialog, limit=limit, search=search)
             logger.info(
-                    (f'Search for ”{search}“: '
+                    f'{self._session_name}: '
+                    + (f'Search for ”{search}“: '
                     if isinstance(search, str) and search else '')
                     + f'Retrieved {len(messages)} out of {messages.total} '
                     'available messages from the dialog.')
@@ -398,8 +404,8 @@ class TelegramReader:
             for user in participants:
                 user.channel = await self.client.get_peer_id(peer=dialog)
             logger.info(
-                    f'Retrieved {len(participants)} out of '
-                    f'{participants.total} available participants '
+                    f'{self._session_name}: Retrieved {len(participants)} '
+                    f'out of {participants.total} available participants '
                     'from the dialog.')
             return participants
         except Exception as e:
@@ -458,9 +464,10 @@ class TelegramReader:
             wait_time = (
                     len(users)//self._full_users_batch*self._full_users_delay)
             logger.info(
-                    f'Started fetching full information for {len(users)} '
-                    f'users. It will take more than {wait_time}s for this '
-                    'batch to be fetched, due to flood wait...')
+                    f'{self._session_name}: Started fetching full '
+                    f'information for {len(users)} users. It will take '
+                    f'more than {wait_time}s for this batch to be fetched, '
+                    'due to flood wait...')
         fetch_tasks = []
         async with asyncio.TaskGroup() as tg:
             fetch_tasks = [
@@ -469,7 +476,7 @@ class TelegramReader:
         full_users = [task.result() for task in fetch_tasks]
         failed_count = sum(user is None for user in full_users)
         logger.info(
-                'Retrieved full information for '
+                f'{self._session_name}: Retrieved full information for '
                 f'{len(full_users)-failed_count} '
                 f'and failed for {failed_count} users.')
         return full_users
@@ -486,15 +493,15 @@ class TelegramReader:
                 dialog_id = await self.client.get_peer_id(peer=dialog)
             except Exception as e:
                 logger.warning(
-                        f'{type(e).__name__}: Could not retrieve '
-                        'dialog id for given entity.')
+                        f'{self._session_name}: {type(e).__name__}: '
+                        f'Could not retrieve dialog id for given entity.')
                 dialog_id = None
             logger.error(
-                    f'{type(error).__name__}: {dialog_id=}: '
-                    f'Error while {context}: {error}')
+                    f'{self._session_name}: {type(error).__name__}: '
+                    f'{dialog_id=}: Error while {context}: {error}')
         else:
             logger.error(
-                    f'{type(error).__name__}: '
+                    f'{self._session_name}: {type(error).__name__}: '
                     f'Error while {context}: {error}')
 
 def check_entity_type(*entities: Dialog|User|Chat|Channel) -> None:
@@ -546,15 +553,14 @@ def check_entity_type(*entities: Dialog|User|Chat|Channel) -> None:
                     f'type: {e}')
 
 async def main() -> None:
-    """Prints basic information about channels the user belongs to."""
-    test_session = ''
-    test_id = 0
-    test_hash = ''
+    """Prints basic information about channels the program tracks."""
     async def print_channel_info(
-            reader: TelegramReader, channel: Dialog|Channel|Chat) -> None:
+            session_name: str,
+            reader: TelegramReader,
+            channel: Dialog|Channel|Chat) -> None:
         users = await reader.get_users(dialog=channel)
         messages = await reader.get_all_messages(dialog=channel, limit=None)
-        print('-------------------------')
+        print('------------', session_name, '------------')
         check_entity_type(channel)
         print(f'It has {channel.entity.participants_count} participants',
               f'and {channel.message.id} messages (including removed ones)')
@@ -562,16 +568,44 @@ async def main() -> None:
               'available participants.')
         print(f'Retrieved {len(messages)} out of {messages.total}',
               'available messages.')
-    async with TelegramReader(
-            session_name=test_session,
-            api_id=test_id,
-            api_hash=test_hash) as reader:
-        channels = await reader.get_channels(meta_info=True)
-        print(f'You participate in {len(channels)} channels/groups.')
+    async def process_session(session_data: dict) -> None:
+        try:
+            session_name = session_data['session']
+            api_id = session_data['api_id']
+            api_hash = session_data['api_hash']
+        except KeyError as e:
+            try:
+                print(f'==== Session “{session_name}”: Error while reading',
+                      f'login credentials: missing key: {e} ====')
+            except UnboundLocalError:
+                print('==== Error while reading login credentials for',
+                      f'one of the sessions: missing key: {e} ====')
+        else:
+            async with TelegramReader(
+                    session_name, api_id, api_hash) as reader:
+                channels = await reader.get_channels(meta_info=True)
+                print(f'==== Session “{session_name}”: You participate in',
+                      f'{len(channels)} channels/groups ====')
+                async with asyncio.TaskGroup() as tg:
+                    for channel in channels:
+                        tg.create_task(
+                                print_channel_info(
+                                    session_name, reader, channel))
+    try:
+        with open('config.json', 'r') as f:
+            config = json.load(f)
+    except FileNotFoundError as e:
+        print(f'Cannot find configuration file: {e}.')
+    else:
         async with asyncio.TaskGroup() as tg:
-            for channel in channels:
-                tg.create_task(print_channel_info(reader, channel))
+            try:
+                for session in config['sessions']:
+                    tg.create_task(process_session(session))
+            except KeyError as e:
+                print('Configuration file “config.json” does not contain '
+                      f'necessary key: {e}. Cannot print session information.')
 
 if __name__ == '__main__':
+    import json
     from logging_config import root_logger
     asyncio.run(main())
