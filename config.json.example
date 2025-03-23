@@ -1,0 +1,21 @@
+{
+	"sessions": {
+		"telegram": [
+			{
+				"session": "tech_community",
+				"api_id": 24546857,
+				"api_hash": "abcdefghijk1234"
+			},
+			{
+				"session": "cosmetics_satisfaction",
+				"api_id": 9568544536,
+				"api_hash": "chkdfkl34454kjlfgdij33"
+			},
+			{
+				"session": "test1",
+				"api_id": 473234549,
+				"api_hash": "dsfvhdsj3df3"
+			}
+		]
+	}
+}
