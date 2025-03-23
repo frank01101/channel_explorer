@@ -26,7 +26,7 @@ Requirements:
 __author__ = 'Franciszek Humieja'
 __copyright__ = 'Copyright (c) 2025 Franciszek Humieja'
 __license__ = 'MIT'
-__version__ = '1.0.0'
+__version__ = '1.0.1'
 
 import asyncio
 import logging
@@ -554,13 +554,14 @@ def check_entity_type(*entities: Dialog|User|Chat|Channel) -> None:
 
 async def main() -> None:
     """Prints basic information about channels the program tracks."""
+
     async def print_channel_info(
             session_name: str,
             reader: TelegramReader,
             channel: Dialog|Channel|Chat) -> None:
         users = await reader.get_users(dialog=channel)
         messages = await reader.get_all_messages(dialog=channel, limit=None)
-        print('------------', session_name, '------------')
+        print('\n------------', session_name, '------------')
         check_entity_type(channel)
         print(f'It has {channel.entity.participants_count} participants',
               f'and {channel.message.id} messages (including removed ones)')
@@ -568,6 +569,10 @@ async def main() -> None:
               'available participants.')
         print(f'Retrieved {len(messages)} out of {messages.total}',
               'available messages.')
+        for i in range(len(session_name) + 26):
+            print('-', end='')
+        print()
+
     async def process_session(session_data: dict) -> None:
         try:
             session_name = session_data['session']
@@ -575,34 +580,45 @@ async def main() -> None:
             api_hash = session_data['api_hash']
         except KeyError as e:
             try:
-                print(f'==== Session “{session_name}”: Error while reading',
-                      f'login credentials: missing key: {e} ====')
+                print('\n============', session_name, '============')
+                print('Error while reading login credentials:',
+                      f'missing key: {e}.')
+                for i in range(len(session_name) + 26):
+                    print('=', end='')
+                print()
             except UnboundLocalError:
-                print('==== Error while reading login credentials for',
-                      f'one of the sessions: missing key: {e} ====')
+                print('\n==============================')
+                print('Error while reading login credentials for',
+                      f'one of the sessions: missing key: {e}.')
+                print('==============================')
         else:
             async with TelegramReader(
                     session_name, api_id, api_hash) as reader:
                 channels = await reader.get_channels(meta_info=True)
-                print(f'==== Session “{session_name}”: You participate in',
-                      f'{len(channels)} channels/groups ====')
+                print('\n============', session_name, '============')
+                print(f'You participate in {len(channels)} channels/groups.')
+                for i in range(len(session_name) + 26):
+                    print('=', end='')
+                print()
                 async with asyncio.TaskGroup() as tg:
                     for channel in channels:
                         tg.create_task(
                                 print_channel_info(
                                     session_name, reader, channel))
+
+    config_fname = 'config.json'
     try:
-        with open('config.json', 'r') as f:
+        with open(config_fname, 'r') as f:
             config = json.load(f)
     except FileNotFoundError as e:
         print(f'Cannot find configuration file: {e}.')
     else:
         async with asyncio.TaskGroup() as tg:
             try:
-                for session in config['sessions']:
+                for session in config['sessions']['telegram']:
                     tg.create_task(process_session(session))
             except KeyError as e:
-                print('Configuration file “config.json” does not contain '
+                print(f'Configuration file “{config_fname}” does not contain '
                       f'necessary key: {e}. Cannot print session information.')
 
 if __name__ == '__main__':
