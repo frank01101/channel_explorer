@@ -24,7 +24,7 @@ Requirements:
 __author__ = 'Franciszek Humieja'
 __copyright__ = 'Copyright (c) 2025 Franciszek Humieja'
 __license__ = 'MIT'
-__version__ = '1.0.1'
+__version__ = '1.0.2'
 
 import pandas as pd
 import asyncio
@@ -271,7 +271,8 @@ class TelegramDataHandler(TelegramReader):
         if not channels_merged_df.empty:
             # Add some columns for unification with other messaging
             # services and data updates management.
-            channels_merged_df['service'] = 'Telegram'
+            channels_merged_df['session'] = self._session_name
+            channels_merged_df['service'] = 'telegram'
             channels_merged_df['active'] = True
             channels_merged_df['date_saved'] = pd.Timestamp.now(tz='UTC')
             channels_merged_df = channels_merged_df.convert_dtypes()
@@ -403,7 +404,8 @@ class TelegramDataHandler(TelegramReader):
             messages_df['peer_id'] = peer_id_series
             # Add some columns for unification with other messaging
             # services data and data updates management.
-            messages_df['service'] = 'Telegram'
+            messages_df['session'] = self._session_name
+            messages_df['service'] = 'telegram'
             messages_df['active'] = True
             messages_df['date_saved'] = pd.Timestamp.now(tz='UTC')
             messages_df = messages_df.convert_dtypes()
@@ -745,7 +747,8 @@ class TelegramDataHandler(TelegramReader):
         else:
             # Add some columns for unification with other messaging
             # services and data updates management.
-            users_grouped_df['service'] = 'Telegram'
+            users_grouped_df['session'] = self._session_name
+            users_grouped_df['service'] = 'telegram'
             users_grouped_df['active'] = True
             users_grouped_df['date_saved'] = pd.Timestamp.now(tz='UTC')
             users_grouped_df = users_grouped_df.convert_dtypes()
