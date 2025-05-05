@@ -559,47 +559,43 @@ async def main() -> None:
             session_name: str,
             reader: TelegramReader,
             channel: Dialog|Channel|Chat) -> None:
+        line_len = 24
         users = await reader.get_users(dialog=channel)
         messages = await reader.get_all_messages(dialog=channel, limit=None)
-        print('\n------------', session_name, '------------')
+        print('\n' + line_len*'-', session_name, line_len*'-')
         check_entity_type(channel)
-        print(f'It has {channel.entity.participants_count} participants',
-              f'and {channel.message.id} messages (including removed ones)')
+        print(f'It claims to have {channel.entity.participants_count}',
+              f'participants and {channel.message.id} messages')
         print(f'Retrieved {len(users)} out of {users.total}',
               'available participants.')
         print(f'Retrieved {len(messages)} out of {messages.total}',
               'available messages.')
-        for i in range(len(session_name) + 26):
-            print('-', end='')
-        print()
+        print((len(session_name) + 2*(line_len + 1))*'-')
 
     async def process_session(session_data: dict) -> None:
+        line_len = 16
         try:
             session_name = session_data['session']
             api_id = session_data['api_id']
             api_hash = session_data['api_hash']
         except KeyError as e:
             try:
-                print('\n============', session_name, '============')
+                print('\n' + line_len*'=', session_name, line_len*'=')
                 print('Error while reading login credentials:',
                       f'missing key: {e}.')
-                for i in range(len(session_name) + 26):
-                    print('=', end='')
-                print()
+                print((len(session_name) + 2*(line_len + 1))*'=')
             except UnboundLocalError:
-                print('\n==============================')
+                print('\n' + (2*line_len + 6)*'-')
                 print('Error while reading login credentials for',
                       f'one of the sessions: missing key: {e}.')
-                print('==============================')
+                print((2*line_len + 6)*'-')
         else:
             async with TelegramReader(
                     session_name, api_id, api_hash) as reader:
                 channels = await reader.get_channels(meta_info=True)
-                print('\n============', session_name, '============')
+                print('\n' + line_len*'=', session_name, line_len*'=')
                 print(f'You participate in {len(channels)} channels/groups.')
-                for i in range(len(session_name) + 26):
-                    print('=', end='')
-                print()
+                print((len(session_name) + 2*(line_len + 1))*'=')
                 async with asyncio.TaskGroup() as tg:
                     for channel in channels:
                         tg.create_task(
