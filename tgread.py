@@ -585,10 +585,10 @@ async def main() -> None:
                       f'missing key: {e}.')
                 print((len(session_name) + 2*(line_len + 1))*'=')
             except UnboundLocalError:
-                print('\n' + (2*line_len + 6)*'-')
+                print('\n' + (2*line_len + 6)*'=')
                 print('Error while reading login credentials for',
                       f'one of the sessions: missing key: {e}.')
-                print((2*line_len + 6)*'-')
+                print((2*line_len + 6)*'=')
         else:
             async with TelegramReader(
                     session_name, api_id, api_hash) as reader:
