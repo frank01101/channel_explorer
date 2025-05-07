@@ -1,4 +1,9 @@
 {
+	"services": ["telegram", "whatsapp"],
+	"abbreviations": {
+		"telegram": "tg",
+		"whatsapp": "wa"
+	},
 	"sessions": {
 		"telegram": [
 			{
