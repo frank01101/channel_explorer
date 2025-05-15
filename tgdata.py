@@ -24,7 +24,7 @@ Requirements:
 __author__ = 'Franciszek Humieja'
 __copyright__ = 'Copyright (c) 2025 Franciszek Humieja'
 __license__ = 'MIT'
-__version__ = '1.0.2'
+__version__ = '1.0.3'
 
 import pandas as pd
 import asyncio
@@ -818,7 +818,8 @@ class TelegramDataHandler(TelegramReader):
         full_users = [task.result() for task in fetch_full_users_tasks]
         return self.get_users_frame(*users, *full_users)
 
-    def _get_types_count(self, types_list: list[str]) -> set[str]:
+    @staticmethod
+    def _get_types_count(types_list: list[str]) -> set[str]:
             types_unique = set(types_list)
             types_count = {
                     f'{single_type} ({types_list.count(single_type)} '
