@@ -24,7 +24,7 @@ Requirements:
 __author__ = 'Franciszek Humieja'
 __copyright__ = 'Copyright (c) 2025 Franciszek Humieja'
 __license__ = 'MIT'
-__version__ = '1.0.3'
+__version__ = '1.1.0'
 
 import pandas as pd
 import asyncio
@@ -160,7 +160,7 @@ class TelegramDataHandler(TelegramReader):
             types = ', '.join(
                     self._get_types_count(types_list=wrong_channel_types))
             logger.warning(
-                    f'{self._session_name}: Skipping objects of the '
+                    f'{self.session_name}: Skipping objects of the '
                     'following types while creating the DataFrame of '
                     f'channels: {types}.')
         return (channels_dicts, channels_full_dicts)
@@ -226,7 +226,7 @@ class TelegramDataHandler(TelegramReader):
             else:
                 channels_merged_df = pd.DataFrame()
                 logger.error(
-                        f'{self._session_name}: KeyError: Merging Channel '
+                        f'{self.session_name}: KeyError: Merging Channel '
                         'and ChannelFull data is impossible because the '
                         'non-empty Channel data does not contain necessary '
                         f'features: {e}')
@@ -243,7 +243,7 @@ class TelegramDataHandler(TelegramReader):
                 channels_merged_df = channels_df
                 if not channels_full_df.empty:
                     logger.error(
-                            f'{self._session_name}: KeyError: Merging '
+                            f'{self.session_name}: KeyError: Merging '
                             'Channel and ChannelFull data is impossible '
                             'because the non-empty ChannelFull data does '
                             f'not contain necessary features: {e}')
@@ -264,25 +264,25 @@ class TelegramDataHandler(TelegramReader):
                             columns='participants_count_full', inplace=True)
                 except KeyError as e:
                     logger.warning(
-                            f'{self._session_name}: Cannot resolve '
+                            f'{self.session_name}: Cannot resolve '
                             'discrepancies in participants count because '
                             'the non-empty merged DataFrame does not '
                             f'contain necessary features: {e}')
         if not channels_merged_df.empty:
             # Add some columns for unification with other messaging
             # services and data updates management.
-            channels_merged_df['session'] = self._session_name
-            channels_merged_df['service'] = 'telegram'
+            channels_merged_df['session'] = self.session_name
+            channels_merged_df['service'] = service_name
             channels_merged_df['active'] = True
             channels_merged_df['date_saved'] = pd.Timestamp.now(tz='UTC')
             channels_merged_df = channels_merged_df.convert_dtypes()
             logger.info(
-                    f'{self._session_name}: Created a DataFrame for '
+                    f'{self.session_name}: Created a DataFrame for '
                     f'{channels_merged_df.shape[0]} channels with '
                     f'{channels_merged_df.shape[1]} features.')
         else:
             logger.info(
-                    f'{self._session_name}: Created an empty DataFrame '
+                    f'{self.session_name}: Created an empty DataFrame '
                     '(no channels)')
         return channels_merged_df
 
@@ -354,14 +354,14 @@ class TelegramDataHandler(TelegramReader):
             types = ', '.join(
                     self._get_types_count(types_list=wrong_iter_types))
             logger.warning(
-                    f'{self._session_name}: Objects of the following types '
+                    f'{self.session_name}: Objects of the following types '
                     f'passed where iterable objects expected: {types} -- '
                     'skipping while creating the DataFrame of messages.')
         if wrong_message_types:
             types = ', '.join(
                     self._get_types_count(types_list=wrong_message_types))
             logger.warning(
-                    f'{self._session_name}: Skipping objects of the '
+                    f'{self.session_name}: Skipping objects of the '
                     'following types while creating the DataFrame of '
                     f'messages: {types}.')
         return messages_dict
@@ -404,23 +404,23 @@ class TelegramDataHandler(TelegramReader):
             messages_df['peer_id'] = peer_id_series
             # Add some columns for unification with other messaging
             # services data and data updates management.
-            messages_df['session'] = self._session_name
+            messages_df['session'] = self.session_name
             messages_df['service'] = 'telegram'
             messages_df['active'] = True
             messages_df['date_saved'] = pd.Timestamp.now(tz='UTC')
             messages_df = messages_df.convert_dtypes()
             logger.info(
-                    f'{self._session_name}: Created a DataFrame for '
+                    f'{self.session_name}: Created a DataFrame for '
                     f'{messages_df.shape[0]} messages with '
                     f'{messages_df.shape[1]} features.')
         except KeyError as e:
             if messages_df.empty:
                 logger.info(
-                        f'{self._session_name}: Created an empty DataFrame '
+                        f'{self.session_name}: Created an empty DataFrame '
                         '(no messages).')
             else:
                 logger.error(
-                        f'{self._session_name}: KeyError: The non-empty '
+                        f'{self.session_name}: KeyError: The non-empty '
                         'Messages data does not contain necessary '
                         f'features: {e}')
         return messages_df
@@ -558,14 +558,14 @@ class TelegramDataHandler(TelegramReader):
             try:
                 if not messages_df.empty:
                     logger.error(
-                            f'{self._session_name}: {type(e).__name__}: '
+                            f'{self.session_name}: {type(e).__name__}: '
                             'Passed non-empty messages_df DataFrame that '
                             f'does not contain necessary columns: {e}. '
                             'All messages will be fetched instead of the '
                             'new ones.')
             except AttributeError:
                 logger.error(
-                        f'{self._session_name}: {type(e).__name__}: Passed '
+                        f'{self.session_name}: {type(e).__name__}: Passed '
                         f'a {type(messages_df).__name__} object as '
                         'messages_df where pandas.DataFrame type expected. '
                         'All messages will be fetched instead of the new '
@@ -637,14 +637,14 @@ class TelegramDataHandler(TelegramReader):
             types = ', '.join(
                     self._get_types_count(types_list=wrong_iter_types))
             logger.warning(
-                    f'{self._session_name}: Objects of the following types '
+                    f'{self.session_name}: Objects of the following types '
                     f'passed where iterable objects expected: {types} -- '
                     'skipping while creating the DataFrame of users.')
         if wrong_user_types:
             types = ', '.join(
                     self._get_types_count(types_list=wrong_user_types))
             logger.warning(
-                    f'{self._session_name}: Skipping objects of the '
+                    f'{self.session_name}: Skipping objects of the '
                     'following types while creating the DataFrame of '
                     f'users: {types}.')
         return (users_dict, users_full_dict)
@@ -694,7 +694,7 @@ class TelegramDataHandler(TelegramReader):
             else:
                 users_merged_df = pd.DataFrame()
                 logger.error(
-                        f'{self._session_name}: KeyError: Merging User '
+                        f'{self.session_name}: KeyError: Merging User '
                         'and UserFull data is impossible because the '
                         'non-empty User data does not contain necessary '
                         f'features: {e}')
@@ -714,7 +714,7 @@ class TelegramDataHandler(TelegramReader):
                 users_merged_df = users_df
                 if not users_full_df.empty:
                     logger.error(
-                            f'{self._session_name}: KeyError: Merging User '
+                            f'{self.session_name}: KeyError: Merging User '
                             'and UserFull data is impossible because the '
                             'non-empty UserFull data does not contain '
                             f'necessary features: {e}')
@@ -742,18 +742,18 @@ class TelegramDataHandler(TelegramReader):
         except KeyError:
             users_grouped_df = pd.DataFrame()
             logger.info(
-                    f'{self._session_name}: Created an empty DataFrame '
+                    f'{self.session_name}: Created an empty DataFrame '
                     '(no users).')
         else:
             # Add some columns for unification with other messaging
             # services and data updates management.
-            users_grouped_df['session'] = self._session_name
+            users_grouped_df['session'] = self.session_name
             users_grouped_df['service'] = 'telegram'
             users_grouped_df['active'] = True
             users_grouped_df['date_saved'] = pd.Timestamp.now(tz='UTC')
             users_grouped_df = users_grouped_df.convert_dtypes()
             logger.info(
-                    f'{self._session_name}: Created a DataFrame for '
+                    f'{self.session_name}: Created a DataFrame for '
                     f'{users_grouped_df.shape[0]} users with '
                     f'{users_grouped_df.shape[1]} features.')
         return users_grouped_df
