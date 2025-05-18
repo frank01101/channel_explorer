@@ -23,3 +23,7 @@ telethon_logger.setLevel(logging.INFO)
 # Configuration of asyncio logger
 asyncio_logger = logging.getLogger('asyncio')
 asyncio_logger.setLevel(logging.INFO)
+
+# Configuration of aiosqlite logger
+aiosqlite_logger = logging.getLogger('aiosqlite')
+aiosqlite_logger.setLevel(logging.INFO)

@@ -1,9 +1,5 @@
 {
 	"services": ["telegram", "whatsapp"],
-	"abbreviations": {
-		"telegram": "tg",
-		"whatsapp": "wa"
-	},
 	"sessions": {
 		"telegram": [
 			{
@@ -20,6 +16,13 @@
 				"session": "test1",
 				"api_id": 473234549,
 				"api_hash": "dsfvhdsj3df3"
+			}
+		],
+		"whatsapp": [
+			{
+				"session": "research",
+				"api_id": 32454,
+				"api_hash": "dfdfs34345"
 			}
 		]
 	}
