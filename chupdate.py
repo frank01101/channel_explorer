@@ -5,7 +5,7 @@
 __author__ = 'Franciszek Humieja'
 __copyright__ = 'Copyright (c) 2025 Franciszek Humieja'
 __license__ = 'MIT'
-__version__ = '0.1.0-alpha'
+__version__ = '0.1.0-beta'
 
 import asyncio
 import aiosqlite
@@ -15,6 +15,8 @@ import pandas as pd
 from numpy import dtype as np_dtype
 import logging
 import json
+import base64
+import datetime
 from typing import get_args
 
 from tgdata import TelegramDataHandler
@@ -53,7 +55,7 @@ class DatabaseUpdater:
                     f'database: {e}.')
         else:
             logger.info(
-                    f'Opened a connection to the database {self._db_path!r}')
+                    f'Opened the connection to the database {self._db_path!r}')
             async with self.db.cursor() as cur:
                 await cur.execute('PRAGMA journal_mode=WAL')
 
@@ -80,7 +82,8 @@ class DatabaseUpdater:
                 'participants_hidden', 'linked_chat_id', 'service')
         # DataFrame with current channels, downloaded from
         # the messaging service
-        df = await handler.get_all_channels_frame()
+        df_orig = await handler.get_all_channels_frame()
+        df = self._encode_for_sqlite(df=df_orig)
         key_cols = tuple(col for col in df.columns if col in key_cols_all)
         async with self.db.cursor() as cur:
             await self._upsert_table(
@@ -96,9 +99,9 @@ class DatabaseUpdater:
             total_changes = cur.connection.total_changes
         await self.db.commit()
         logger.info(
-                f'service={handler.service_name!r}: '
-                f'session={handler.session_name!r}: Finished upserting table '
-                f"'channels'. Made {total_changes} changes in total.")
+                f'{handler.service_name}/{handler.session_name}: Finished '
+                f"upserting table 'channels'. Made {total_changes} changes "
+                'in total.')
 
     async def _create_table(
             self,
@@ -152,20 +155,19 @@ class DatabaseUpdater:
         SET {', '.join(f'{col}=excluded.{col}' for col in non_key_cols)}
         RETURNING rowid
         '''
-        cur_pre = await self.db.cursor()
-        cur_post = await self.db.cursor()
+        cur_count = await self.db.cursor()
         if virtual_cursor:
             cursor = await self.db.cursor()
         try:
-            await cur_pre.execute(f'SELECT COUNT(*) FROM {table}')
+            await cur_count.execute(f'SELECT COUNT(*) FROM {table}')
         except OperationalError as e:
             if 'no such table' in str(e):
                 logger.warning(
                         f'Table {table!r} does not exist in the database. '
-                        'A new table will be created.')
+                        'A new table is being created...')
                 await self._create_table(
                         name=table,
-                        dtypes=df.dtypes,
+                        dtypes=df.convert_dtypes().dtypes,
                         key_cols=key_cols,
                         cursor=cursor)
                 await self._upsert_table(
@@ -173,15 +175,17 @@ class DatabaseUpdater:
             else:
                 raise
         else:
+            pre_count_result = await cur_count.fetchone()
             # SQLite does not provide support for RETURNING in the
             # Cursor.executemany() method. This is why a loop is used
             # here to gather upserted row ids in a list.
             for row in df.values.tolist():
                 await cursor.execute(sql=upsert_sql, parameters=row)
-                if cursor.fetchone():
-                    upserted_rows.append(cursor.fetchone()[0])
-            await cur_post.execute(f'SELECT COUNT(*) FROM {table}')
-            n_inserted_rows = cur_post.fetchone()[0] - cur_pre.fetchone()[0]
+                upsert_result = await cursor.fetchone()
+                upserted_rows.append(upsert_result[0])
+            await cur_count.execute(f'SELECT COUNT(*) FROM {table}')
+            post_count_result = await cur_count.fetchone()
+            n_inserted_rows = post_count_result[0] - pre_count_result[0]
             logger.info(
                     f'Table {table!r}: inserted {n_inserted_rows} rows and '
                     f'updated {len(upserted_rows)-n_inserted_rows} rows.')
@@ -197,8 +201,7 @@ class DatabaseUpdater:
                 '''
                 await cursor.execute(sql=select_sql, parameters=upserted_rows)
         finally:
-            await cur_pre.close()
-            await cur_post.close()
+            await cur_count.close()
             if virtual_cursor:
                 await cursor.close()
 
@@ -210,7 +213,10 @@ class DatabaseUpdater:
             *,
             cursor: Cursor = None) -> None:
         virtual_cursor = True if not cursor else False
-        upserted_rows = tuple(row[0] for row in cur.fetchall())
+        if virtual_cursor:
+            cursor = await self.db.cursor()
+        rows_result = await cursor.fetchall()
+        upserted_rows = tuple(row[0] for row in rows_result)
         update_sql = f'''
         UPDATE {table}
         SET active = FALSE
@@ -218,8 +224,6 @@ class DatabaseUpdater:
             AND service = ?
             AND session = ?
         '''
-        if virtual_cursor:
-            cursor = await self.db.cursor()
         try:
             await cursor.execute(
                     sql=update_sql,
@@ -232,18 +236,39 @@ class DatabaseUpdater:
                 await cursor.close()
 
     @staticmethod
+    def _encode_for_sqlite(df: pd.DataFrame) -> pd.DataFrame:
+        def data_encoder(obj):
+            def json_encoder(inner_obj):
+                if isinstance(inner_obj, bytes):
+                    return base64.b64encode(inner_obj).decode('ascii')
+                if isinstance(inner_obj, (datetime.datetime, datetime.date)):
+                    return inner_obj.isoformat()
+                raise TypeError(
+                        f'Object of type {type(inner_obj).__name__} is not '
+                        'JSON serializable')
+            if isinstance(obj, (dict, list)):
+                return json.dumps(obj, default=json_encoder)
+            elif isinstance(obj, (datetime.datetime, datetime.date)):
+                return obj.isoformat()
+            elif pd.isna(obj):
+                return None
+            else:
+                return obj
+        return df.map(data_encoder)
+
+    @staticmethod
     def _map_dtype(
             dtype: np_dtype | pd.api.extensions.ExtensionDtype | str) -> str:
         if pd.api.types.is_integer_dtype(dtype):
-            return "INTEGER"
+            return 'INTEGER'
         elif pd.api.types.is_bool_dtype(dtype):
-            return "BOOLEAN"
+            return 'INTEGER'
         elif pd.api.types.is_float_dtype(dtype):
-            return "REAL"
+            return 'REAL'
         elif pd.api.types.is_datetime64_any_dtype(dtype):
-            return "TIMESTAMP"
+            return 'TEXT'
         else:
-            return "TEXT"
+            return 'TEXT'
 
 def map_data_handler(
         service_name: str,
@@ -263,7 +288,7 @@ async def process_session(
         session_name = session_data['session']
     except KeyError as e:
         logger.error(
-                f'{service_name=}: KeyError: Cannot read session name '
+                f'{service_name}: KeyError: Cannot read session name '
                 'for one of the sessions because the configuration file '
                 f'does not contain necessary key: {e}.')
     else:
@@ -272,25 +297,24 @@ async def process_session(
             api_hash = session_data['api_hash']
         except KeyError as e:
             logger.error(
-                    f'{service_name=}: {session_name=}: KeyError: Cannot '
-                    'read session credentials because the configuration '
-                    f'file does not contain necessary key: {e}.')
+                    f'{service_name}/{session_name}: KeyError: Cannot read '
+                    'session credentials because the configuration file does '
+                    f'not contain necessary key: {e}.')
         else:
             try:
                 handler = map_data_handler(
                         service_name, session_name, api_id, api_hash)
-            except (ValueError, NotImplementedError) as e:
+            except (ValueError, NotImplementedError, AttributeError) as e:
                 logger.error(
-                        f'{service_name=}: {session_name=}: '
-                        f'{type(e).__name__}: Cannot initialize data '
-                        f'handler: {e}.')
+                        f'{service_name}/{session_name}: {type(e).__name__}: '
+                        f'Cannot initialize data handler: {e}.')
             else:
                 async with handler:
                     try:
                         await updater.update_channels(handler=handler)
                     except aiosqlite.Error as e:
                         logger.error(
-                                f'{service_name=}: {session_name=}: '
+                                f'{service_name}/{session_name}: '
                                 f'{type(e).__name__}: Cannot update '
                                 f'channel table in the database: {e}.')
 
@@ -317,7 +341,7 @@ async def main() -> None:
                                             session_data=session))
                         except KeyError as e:
                             logger.error(
-                                    f'{service=}: KeyError: Configuration '
+                                    f'{service}: KeyError: Configuration '
                                     f'file {config_fpath!r} does not contain '
                                     f"necessary key: {e} in 'sessions'. "
                                     'Cannot obtain session information.')
