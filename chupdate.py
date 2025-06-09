@@ -5,7 +5,7 @@
 __author__ = 'Franciszek Humieja'
 __copyright__ = 'Copyright (c) 2025 Franciszek Humieja'
 __license__ = 'MIT'
-__version__ = '0.1.0-beta'
+__version__ = '0.1.0'
 
 import asyncio
 import aiosqlite
@@ -35,7 +35,6 @@ DataHandler = (TelegramDataHandler | WhatsAppDataHandler | SignalDataHandler |
 class DatabaseUpdater:
     def __init__(self, db_path: str):
         self._db_path = db_path
-        self._lock = asyncio.Lock()
         self.db = None
 
     async def __aenter__(self):
@@ -54,13 +53,14 @@ class DatabaseUpdater:
                     f'{type(e).__name__}: Error while connecting to the '
                     f'database: {e}.')
         else:
-            logger.info(
-                    f'Opened the connection to the database {self._db_path!r}')
             async with self.db.cursor() as cur:
                 await cur.execute('PRAGMA journal_mode=WAL')
+            logger.info(
+                    f'Opened the connection to the database {self._db_path!r}')
 
     async def stop(self):
         """Closes connection to the database asynchronously."""
+        total_changes = self.db.total_changes
         try:
             await self.db.close()
         except (OperationalError, DatabaseError) as e:
@@ -70,7 +70,8 @@ class DatabaseUpdater:
         else:
             logger.info(
                     'Closed the connection to the database '
-                    f'{self._db_path!r}.')
+                    f'{self._db_path!r}. Performed {total_changes} '
+                    'operations on database rows in total.')
 
     async def update_channels(self, handler: DataHandler) -> None:
         # Tuple of key database columns; each change of a value in one
@@ -87,21 +88,30 @@ class DatabaseUpdater:
         key_cols = tuple(col for col in df.columns if col in key_cols_all)
         async with self.db.cursor() as cur:
             await self._upsert_table(
-                    table='channels',
-                    df=df,
+                    table='channel',
+                    df=df.drop(columns='date_joined'),
                     key_cols=key_cols,
                     cursor=cur)
             await self._disactivate_old_rows(
-                    table='channels',
+                    table='channel',
                     service=handler.service_name,
                     session=handler.session_name,
                     cursor=cur)
-            total_changes = cur.connection.total_changes
+            await self._upsert_table(
+                    table='channel_session',
+                    df=df[[
+                        'id', 'date_joined', 'session', 'service', 'active']],
+                    key_cols=('id', 'date_joined', 'session', 'service'),
+                    cursor=cur)
+            await self._disactivate_old_rows(
+                    table='channel_session',
+                    service=handler.service_name,
+                    session=handler.session_name,
+                    cursor=cur)
         await self.db.commit()
         logger.info(
                 f'{handler.service_name}/{handler.session_name}: Finished '
-                f"upserting table 'channels'. Made {total_changes} changes "
-                'in total.')
+                f"upserting table 'channel'.")
 
     async def _create_table(
             self,
@@ -113,26 +123,35 @@ class DatabaseUpdater:
             cursor: Cursor = None) -> None:
         virtual_cursor = True if not cursor else False
         columns = []
-        constraints = []
+        unique_columns = []
         try:
             for col, dtype in dtypes.items():
                 sqlite_type = self._map_dtype(dtype=dtype)
+                null_value = self._map_null_value(dtype=dtype)
                 if col == 'id':
                     sqlite_type = f'{sqlite_type} NOT NULL'
                 columns.append(f'{col} {sqlite_type}')
+                if col in key_cols:
+                    unique_columns.append(f'COALESCE({col}, {null_value})')
         except AttributeError:
             columns = [*cols]
             columns[columns.index('id')] = 'id NOT NULL'
-        if key_cols is not None:
-            constraints.append(
-                    f"CONSTRAINT {name}_unique UNIQUE ({', '.join(key_cols)})")
+            unique_columns = key_cols
         create_sql = f'''
-        CREATE TABLE IF NOT EXISTS {name} ({', '.join(columns + constraints)})
+        CREATE TABLE IF NOT EXISTS {name} ({', '.join(columns)})
+        '''
+        unique_sql = f'''
+        CREATE UNIQUE INDEX IF NOT EXISTS {name}_unique
+        ON {name} ({', '.join(unique_columns)})
         '''
         if virtual_cursor:
             cursor = await self.db.cursor()
         try:
+            logger.debug(create_sql)
+            logger.debug(unique_sql)
             await cursor.execute(sql=create_sql)
+            if key_cols is not None:
+                await cursor.execute(sql=unique_sql)
         finally:
             if virtual_cursor:
                 await cursor.close()
@@ -148,13 +167,14 @@ class DatabaseUpdater:
         virtual_cursor = True if not cursor else False
         non_key_cols = tuple(col for col in df.columns if col not in key_cols)
         upserted_rows = []
-        upsert_sql = f'''
+        upsert_sql = f"""
         INSERT INTO {table} ({', '.join(df.columns)})
         VALUES ({', '.join('?'*df.shape[1])})
-        ON CONFLICT ({', '.join(key_cols)}) DO UPDATE
-        SET {', '.join(f'{col}=excluded.{col}' for col in non_key_cols)}
+        ON CONFLICT DO {f'''UPDATE
+        SET {', '.join(f'{col}=excluded.{col}' for col in non_key_cols)}'''
+        if non_key_cols else 'NOTHING'}
         RETURNING rowid
-        '''
+        """
         cur_count = await self.db.cursor()
         if virtual_cursor:
             cursor = await self.db.cursor()
@@ -179,10 +199,12 @@ class DatabaseUpdater:
             # SQLite does not provide support for RETURNING in the
             # Cursor.executemany() method. This is why a loop is used
             # here to gather upserted row ids in a list.
+            logger.debug(upsert_sql)
             for row in df.values.tolist():
                 await cursor.execute(sql=upsert_sql, parameters=row)
                 upsert_result = await cursor.fetchone()
-                upserted_rows.append(upsert_result[0])
+                if upsert_result:
+                    upserted_rows.append(upsert_result[0])
             await cur_count.execute(f'SELECT COUNT(*) FROM {table}')
             post_count_result = await cur_count.fetchone()
             n_inserted_rows = post_count_result[0] - pre_count_result[0]
@@ -220,11 +242,13 @@ class DatabaseUpdater:
         update_sql = f'''
         UPDATE {table}
         SET active = FALSE
-        WHERE rowid NOT IN ({', '.join('?'*len(upserted_rows))})
+        WHERE active = TRUE
+            AND rowid NOT IN ({', '.join('?'*len(upserted_rows))})
             AND service = ?
             AND session = ?
         '''
         try:
+            logger.debug(update_sql)
             await cursor.execute(
                     sql=update_sql,
                     parameters=(*upserted_rows, service, session))
@@ -270,6 +294,19 @@ class DatabaseUpdater:
         else:
             return 'TEXT'
 
+    @staticmethod
+    def _map_null_value(
+            dtype: np_dtype | pd.api.extensions.ExtensionDtype | str
+    ) -> int | float | str:
+        if pd.api.types.is_integer_dtype(dtype):
+            return -1
+        elif pd.api.types.is_bool_dtype(dtype):
+            return -1
+        elif pd.api.types.is_float_dtype(dtype):
+            return -1.0
+        else:
+            return "''"
+
 def map_data_handler(
         service_name: str,
         session_name: str,
@@ -278,7 +315,7 @@ def map_data_handler(
     for HandlerCls in get_args(DataHandler):
         if service_name == HandlerCls.service_name:
             return HandlerCls(session_name, api_id, api_hash)
-    raise ValueError(f'Invalid service name: {service_name}')
+    raise ValueError(f'Unrecognized service name: {service_name}')
 
 async def process_session(
         updater: DatabaseUpdater,
