@@ -24,7 +24,7 @@ Requirements:
 __author__ = 'Franciszek Humieja'
 __copyright__ = 'Copyright (c) 2025 Franciszek Humieja'
 __license__ = 'MIT'
-__version__ = '1.1.1'
+__version__ = '1.1.2'
 
 import pandas as pd
 import asyncio
@@ -405,7 +405,7 @@ class TelegramDataHandler(TelegramReader):
             # Add some columns for unification with other messaging
             # services data and data updates management.
             messages_df['session'] = self.session_name
-            messages_df['service'] = 'telegram'
+            messages_df['service'] = self.service_name
             messages_df['active'] = True
             messages_df['date_saved'] = pd.Timestamp.now(tz='UTC')
             messages_df = messages_df.convert_dtypes()
@@ -748,7 +748,7 @@ class TelegramDataHandler(TelegramReader):
             # Add some columns for unification with other messaging
             # services and data updates management.
             users_grouped_df['session'] = self.session_name
-            users_grouped_df['service'] = 'telegram'
+            users_grouped_df['service'] = self.service_name
             users_grouped_df['active'] = True
             users_grouped_df['date_saved'] = pd.Timestamp.now(tz='UTC')
             users_grouped_df = users_grouped_df.convert_dtypes()
