@@ -5,11 +5,12 @@
 __author__ = 'Franciszek Humieja'
 __copyright__ = 'Copyright (c) 2025 Franciszek Humieja'
 __license__ = 'MIT'
-__version__ = '0.1.0'
+__version__ = '0.2.0'
 
 import asyncio
 import aiosqlite
-from sqlite3 import OperationalError, DatabaseError, ProgrammingError
+from sqlite3 import (OperationalError, DatabaseError, ProgrammingError,
+                     IntegrityError)
 from sqlite3 import Cursor
 import pandas as pd
 from numpy import dtype as np_dtype
@@ -73,17 +74,18 @@ class DatabaseUpdater:
                     f'{self._db_path!r}. Performed {total_changes} '
                     'operations on database rows in total.')
 
-    async def update_channels(self, handler: DataHandler) -> None:
+    async def update_channels(
+            self, handler: DataHandler, *, full_info: bool = False) -> None:
         # Tuple of key database columns; each change of a value in one
         # of these columns will be recorded.
         key_cols_all = (
                 'id', '_', 'title', 'creator', 'broadcast', 'megagroup',
                 'restricted', 'scam', 'fake', 'gigagroup', 'username',
                 'deactivated', '__full', 'about', 'can_view_participants',
-                'participants_hidden', 'linked_chat_id', 'service')
+                'participants_hidden', 'linked_chat_id', 'service', 'active')
         # DataFrame with current channels, downloaded from
         # the messaging service
-        df_orig = await handler.get_all_channels_frame()
+        df_orig = await handler.get_all_channels_frame(full_info=full_info)
         df = self._encode_for_sqlite(df=df_orig)
         key_cols = tuple(col for col in df.columns if col in key_cols_all)
         async with self.db.cursor() as cur:
@@ -92,22 +94,26 @@ class DatabaseUpdater:
                     df=df.drop(columns='date_joined'),
                     key_cols=key_cols,
                     cursor=cur)
-            await self._disactivate_old_rows(
-                    table='channel',
-                    service=handler.service_name,
-                    session=handler.session_name,
-                    cursor=cur)
+            if full_info:
+                await self._disactivate_old_rows(
+                        table='channel',
+                        service=handler.service_name,
+                        session=handler.session_name,
+                        cursor=cur)
             await self._upsert_table(
                     table='channel_session',
                     df=df[[
-                        'id', 'date_joined', 'session', 'service', 'active']],
-                    key_cols=('id', 'date_joined', 'session', 'service'),
+                        'id', 'date_joined', 'session', 'service', 'active',
+                        'date_saved']],
+                    key_cols=(
+                        'id', 'date_joined', 'session', 'service', 'active'),
                     cursor=cur)
-            await self._disactivate_old_rows(
-                    table='channel_session',
-                    service=handler.service_name,
-                    session=handler.session_name,
-                    cursor=cur)
+            if full_info:
+                await self._disactivate_old_rows(
+                        table='channel_session',
+                        service=handler.service_name,
+                        session=handler.session_name,
+                        cursor=cur)
         await self.db.commit()
         logger.info(
                 f'{handler.service_name}/{handler.session_name}: Finished '
@@ -122,21 +128,28 @@ class DatabaseUpdater:
             key_cols: list | tuple = None,
             cursor: Cursor = None) -> None:
         virtual_cursor = True if not cursor else False
+        key_cols_full = self._find_key_cols_full(key_cols=key_cols)
         columns = []
         unique_columns = []
         try:
             for col, dtype in dtypes.items():
                 sqlite_type = self._map_dtype(dtype=dtype)
-                null_value = self._map_null_value(dtype=dtype)
                 if col == 'id':
                     sqlite_type = f'{sqlite_type} NOT NULL'
                 columns.append(f'{col} {sqlite_type}')
-                if col in key_cols:
-                    unique_columns.append(f'COALESCE({col}, {null_value})')
+                if col in key_cols and col not in key_cols_full:
+                    if col == 'active':
+                        unique_columns.append(col)
+                    else:
+                        null_value = self._map_null_value(dtype=dtype)
+                        unique_columns.append(f'COALESCE({col}, {null_value})')
         except AttributeError:
             columns = [*cols]
             columns[columns.index('id')] = 'id NOT NULL'
-            unique_columns = key_cols
+            unique_columns = tuple(
+                    f"COALESCE({col}, '')" for col in key_cols
+                    if col not in key_cols_full and col != 'active')
+            unique_columns.append('active')
         create_sql = f'''
         CREATE TABLE IF NOT EXISTS {name} ({', '.join(columns)})
         '''
@@ -165,14 +178,34 @@ class DatabaseUpdater:
             *,
             cursor: Cursor = None) -> None:
         virtual_cursor = True if not cursor else False
+        key_cols_full = tuple(self._find_key_cols_full(key_cols=key_cols))
+        key_cols_basic = tuple(
+                col for col in key_cols if col not in key_cols_full)
         non_key_cols = tuple(col for col in df.columns if col not in key_cols)
         upserted_rows = []
+        # The following SQL prevents from overwriting rows for which
+        # basic info was intact but full info columns were modified.
+        # This case is an exception, not preserved by the unique index
+        # contraint of the tables. By setting active=FALSE, it makes
+        # the new row being inserted, instead of firing an unwanted
+        # conflict in the following upsert.
+        def pre_disactivate_sql(active_val: str = 'FALSE') -> str:
+            return f"""
+            UPDATE {table}
+            SET active = {active_val}
+            WHERE __full IS NOT NULL
+                AND {' AND '.join(f"COALESCE({col}, '') = COALESCE(?, '')"
+                     for col in key_cols_basic)}
+                AND ({' OR '.join(f"COALESCE({col}, '') != COALESCE(?, '')"
+                      for col in key_cols_full)})
+            """
         upsert_sql = f"""
         INSERT INTO {table} ({', '.join(df.columns)})
         VALUES ({', '.join('?'*df.shape[1])})
         ON CONFLICT DO {f'''UPDATE
-        SET {', '.join(f'{col}=excluded.{col}' for col in non_key_cols)}'''
-        if non_key_cols else 'NOTHING'}
+        SET {', '.join(f'{col} = excluded.{col}'
+             for col in key_cols_full + non_key_cols)}'''
+        if key_cols_full or non_key_cols else 'NOTHING'}
         RETURNING rowid
         """
         cur_count = await self.db.cursor()
@@ -196,6 +229,29 @@ class DatabaseUpdater:
                 raise
         else:
             pre_count_result = await cur_count.fetchone()
+            if key_cols_full:
+                rows_key_cols = (
+                        df
+                        .loc[:, key_cols_basic + key_cols_full]
+                        .values
+                        .tolist())
+                try:
+                    logger.debug(pre_disactivate_sql())
+                    await cursor.executemany(
+                            sql=pre_disactivate_sql(),
+                            parameters=rows_key_cols)
+                    logger.info(
+                            f'Table {table!r}: Premarked {cursor.rowcount} '
+                            'rows as inactive.')
+                except IntegrityError:
+                    logger.debug(pre_disactivate_sql('NULL'))
+                    await cursor.executemany(
+                            sql=pre_disactivate_sql(active_val='NULL'),
+                            parameters=rows_key_cols)
+                    logger.info(
+                            f'Table {table!r}: Premarked {cursor.rowcount} '
+                            'rows as inactive (with NULL value for '
+                            'uniqueness integrity).')
             # SQLite does not provide support for RETURNING in the
             # Cursor.executemany() method. This is why a loop is used
             # here to gather upserted row ids in a list.
@@ -209,7 +265,7 @@ class DatabaseUpdater:
             post_count_result = await cur_count.fetchone()
             n_inserted_rows = post_count_result[0] - pre_count_result[0]
             logger.info(
-                    f'Table {table!r}: inserted {n_inserted_rows} rows and '
+                    f'Table {table!r}: Inserted {n_inserted_rows} rows and '
                     f'updated {len(upserted_rows)-n_inserted_rows} rows.')
             if not virtual_cursor:
                 # Since the aim is to store upserted row ids as cursor
@@ -239,25 +295,43 @@ class DatabaseUpdater:
             cursor = await self.db.cursor()
         rows_result = await cursor.fetchall()
         upserted_rows = tuple(row[0] for row in rows_result)
-        update_sql = f'''
-        UPDATE {table}
-        SET active = FALSE
-        WHERE active = TRUE
-            AND rowid NOT IN ({', '.join('?'*len(upserted_rows))})
-            AND service = ?
-            AND session = ?
-        '''
+        def update_sql(active_val: str = 'FALSE') -> str:
+            return f'''
+            UPDATE {table}
+            SET active = {active_val}
+            WHERE active = TRUE
+                AND rowid NOT IN ({', '.join('?'*len(upserted_rows))})
+                AND service = ?
+                AND session = ?
+            '''
         try:
-            logger.debug(update_sql)
+            logger.debug(update_sql())
             await cursor.execute(
-                    sql=update_sql,
+                    sql=update_sql(),
                     parameters=(*upserted_rows, service, session))
             logger.info(
                     f'Table {table!r}: Marked {cursor.rowcount} rows '
                     'as inactive.')
+        except IntegrityError:
+            logger.debug(update_sql('NULL'))
+            await cursor.execute(
+                    sql=update_sql(active_val='NULL'),
+                    parameters=(*upserted_rows, service, session))
+            logger.info(
+                    f'Table {table!r}: Marked {cursor.rowcount} rows '
+                    'as inactive (with NULL value for uniqueness integrity).')
         finally:
             if virtual_cursor:
                 await cursor.close()
+
+    @staticmethod
+    def _find_key_cols_full(key_cols: list | tuple) -> list | tuple:
+        try:
+            full_start = key_cols.index('__full')
+            full_end = key_cols.index('service')
+            return key_cols[full_start:full_end]
+        except ValueError:
+            return tuple()
 
     @staticmethod
     def _encode_for_sqlite(df: pd.DataFrame) -> pd.DataFrame:
@@ -348,7 +422,8 @@ async def process_session(
             else:
                 async with handler:
                     try:
-                        await updater.update_channels(handler=handler)
+                        await updater.update_channels(
+                                handler=handler, full_info=True)
                     except aiosqlite.Error as e:
                         logger.error(
                                 f'{service_name}/{session_name}: '
