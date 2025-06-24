@@ -24,7 +24,7 @@ Requirements:
 __author__ = 'Franciszek Humieja'
 __copyright__ = 'Copyright (c) 2025 Franciszek Humieja'
 __license__ = 'MIT'
-__version__ = '1.1.2'
+__version__ = '1.1.3'
 
 import pandas as pd
 import asyncio
@@ -274,7 +274,11 @@ class TelegramDataHandler(TelegramReader):
             channels_merged_df['session'] = self.session_name
             channels_merged_df['service'] = self.service_name
             channels_merged_df['active'] = True
-            channels_merged_df['date_saved'] = pd.Timestamp.now(tz='UTC')
+            current_time = pd.Timestamp.now(tz='UTC')
+            if not channels_df.empty:
+                channels_merged_df['date_saved'] = current_time
+            if not channels_full_df.empty:
+                channels_merged_df['date_saved_full'] = current_time
             channels_merged_df = channels_merged_df.convert_dtypes()
             logger.info(
                     f'{self.session_name}: Created a DataFrame for '
@@ -750,7 +754,11 @@ class TelegramDataHandler(TelegramReader):
             users_grouped_df['session'] = self.session_name
             users_grouped_df['service'] = self.service_name
             users_grouped_df['active'] = True
-            users_grouped_df['date_saved'] = pd.Timestamp.now(tz='UTC')
+            if not users_df.empty:
+                users_grouped_df['date_saved'] = pd.Timestamp.now(tz='UTC')
+            if not users_full_df.empty:
+                users_grouped_df['date_saved_full'] = (
+                        pd.Timestamp.now(tz='UTC'))
             users_grouped_df = users_grouped_df.convert_dtypes()
             logger.info(
                     f'{self.session_name}: Created a DataFrame for '
