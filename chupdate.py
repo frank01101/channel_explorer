@@ -5,7 +5,7 @@
 __author__ = 'Franciszek Humieja'
 __copyright__ = 'Copyright (c) 2025 Franciszek Humieja'
 __license__ = 'MIT'
-__version__ = '0.2.0'
+__version__ = '0.3.0'
 
 import asyncio
 import aiosqlite
@@ -75,18 +75,18 @@ class DatabaseUpdater:
                     'operations on database rows in total.')
 
     async def update_channels(
-            self, handler: DataHandler, *, full_info: bool = False) -> None:
+            self, handler: DataHandler, channels_df: pd.DataFrame) -> None:
         # Tuple of key database columns; each change of a value in one
-        # of these columns will be recorded.
+        # of these columns will be preserved -- a row with the new value
+        # will be inserted in a new position, leaving the row with the
+        # old value at the place.
         key_cols_all = (
                 'id', '_', 'title', 'creator', 'broadcast', 'megagroup',
                 'restricted', 'scam', 'fake', 'gigagroup', 'username',
                 'deactivated', '__full', 'about', 'can_view_participants',
                 'participants_hidden', 'linked_chat_id', 'service', 'active')
-        # DataFrame with current channels, downloaded from
-        # the messaging service
-        df_orig = await handler.get_all_channels_frame(full_info=full_info)
-        df = self._encode_for_sqlite(df=df_orig)
+        full_info = True if '__full' in channels_df.columns else False
+        df = self._encode_for_sqlite(df=channels_df)
         key_cols = tuple(col for col in df.columns if col in key_cols_all)
         async with self.db.cursor() as cur:
             await self._upsert_table(
@@ -118,6 +118,88 @@ class DatabaseUpdater:
         logger.info(
                 f'{handler.service_name}/{handler.session_name}: Finished '
                 f"upserting table 'channel'.")
+
+    async def update_users(
+            self,
+            handler: DataHandler,
+            channels_df: pd.DataFrame,
+            *,
+            full_info: bool = False) -> None:
+        # Tuple of key database columns; each change of a value in one
+        # of these columns will be preserved -- a row with the new value
+        # will be inserted in a new position, leaving the row with the
+        # old value at the place.
+        key_cols_all = (
+                '_', 'id', 'deleted', 'bot', 'verified', 'restricted', 'scam',
+                'fake', 'premium', 'bot_business', 'first_name', 'last_name',
+                'username', 'phone', '__full', 'about',
+                'business_greeting_message', 'business_away_message',
+                'business_intro', 'birthday', 'personal_channel_id',
+                'service', 'active')
+        cols_exclude_all = (
+                'is_self', 'contact', 'mutual_contact', 'close_friend',
+                'blocked', 'channels')
+        cols_session_all = (
+                'id', 'is_self', 'contact', 'mutual_contact', 'close_friend',
+                'blocked', 'session', 'service', 'active', 'date_saved',
+                'date_saved_full')
+        channel_full_info = True if '__full' in channels_df.columns else False
+        df_orig = await handler.get_all_users_frame(
+                channels_df, full_info=full_info)
+        df_users_channels_orig = (
+                df_orig[[
+                    'id', 'channels', 'session', 'service', 'active',
+                    'date_saved']]
+                .explode(column='channels', ignore_index=True)
+                .rename(columns={'channels': 'channel'})
+                .convert_dtypes())
+        df = self._encode_for_sqlite(df=df_orig)
+        df_users_channels = self._encode_for_sqlite(df=df_users_channels_orig)
+        key_cols = tuple(col for col in df.columns if col in key_cols_all)
+        cols_exclude = [
+                col for col in df.columns if col in cols_exclude_all]
+        cols_session = [
+                col for col in df.columns if col in cols_session_all]
+        async with self.db.cursor() as cur:
+            await self._upsert_table(
+                    table='user',
+                    df=df.drop(columns=cols_exclude),
+                    key_cols=key_cols,
+                    cursor=cur)
+            if channel_full_info:
+                await self._disactivate_old_rows(
+                        table='user',
+                        service=handler.service_name,
+                        session=handler.session_name,
+                        cursor=cur)
+            await self._upsert_table(
+                    table='user_session',
+                    df=df[cols_session],
+                    key_cols=tuple(
+                        col for col in cols_session if col not in
+                        ('blocked', 'date_saved', 'date_saved_full')),
+                    cursor=cur)
+            if channel_full_info:
+                await self._disactivate_old_rows(
+                        table='user_session',
+                        service=handler.service_name,
+                        session=handler.session_name,
+                        cursor=cur)
+            await self._upsert_table(
+                    table='user_channel',
+                    df=df_users_channels,
+                    key_cols=('id', 'channel', 'service', 'active'),
+                    cursor=cur)
+            if channel_full_info:
+                await self._disactivate_old_rows(
+                        table='user_channel',
+                        service=handler.service_name,
+                        session=handler.session_name,
+                        cursor=cur)
+        await self.db.commit()
+        logger.info(
+                f'{handler.service_name}/{handler.session_name}: Finished '
+                f"upserting table 'user'.")
 
     async def _create_table(
             self,
@@ -305,7 +387,6 @@ class DatabaseUpdater:
                 AND session = ?
             '''
         try:
-            logger.debug(update_sql())
             await cursor.execute(
                     sql=update_sql(),
                     parameters=(*upserted_rows, service, session))
@@ -313,7 +394,6 @@ class DatabaseUpdater:
                     f'Table {table!r}: Marked {cursor.rowcount} rows '
                     'as inactive.')
         except IntegrityError:
-            logger.debug(update_sql('NULL'))
             await cursor.execute(
                     sql=update_sql(active_val='NULL'),
                     parameters=(*upserted_rows, service, session))
@@ -421,14 +501,26 @@ async def process_session(
                         f'Cannot initialize data handler: {e}.')
             else:
                 async with handler:
+                    channels_df = await handler.get_all_channels_frame(
+                            full_info=True)
                     try:
                         await updater.update_channels(
-                                handler=handler, full_info=True)
+                                handler=handler, channels_df=channels_df)
                     except aiosqlite.Error as e:
                         logger.error(
                                 f'{service_name}/{session_name}: '
                                 f'{type(e).__name__}: Cannot update '
-                                f'channel table in the database: {e}.')
+                                f"table 'channel' in the database: {e}.")
+                    try:
+                        await updater.update_users(
+                                handler=handler,
+                                channels_df=channels_df,
+                                full_info=False)
+                    except aiosqlite.Error as e:
+                        logger.error(
+                                f'{service_name}/{session_name}: '
+                                f'{type(e).__name__}: Cannot update '
+                                f"table 'user' in the database: {e}.")
 
 async def main() -> None:
     config_fpath = 'config.json'
