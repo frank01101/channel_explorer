@@ -9,7 +9,7 @@ The currently supported instant messaging service is Telegram but more services 
 
 ## General plan of the program operation
 1. Updating the database of all observed channels and groups.
-2. (In preparation) Updating the database of all users of these channels and groups.
+2. Updating the database of all users of these channels and groups.
 3. (In preparation) Updating the database of conversations from these channels and groups.
 4. (In preparation) Updating the database of highlighted messages that require action – as defined by the user (e.g., complaints, questions, doubts, etc.)
 5. (In preparation) Using the large language model (LLM) to talk to users of channels and groups to achieve a specific goal.
