@@ -5,7 +5,7 @@
 __author__ = 'Franciszek Humieja'
 __copyright__ = 'Copyright (c) 2025 Franciszek Humieja'
 __license__ = 'MIT'
-__version__ = '0.3.0'
+__version__ = '0.4.0'
 
 import asyncio
 import aiosqlite
@@ -200,6 +200,48 @@ class DatabaseUpdater:
         logger.info(
                 f'{handler.service_name}/{handler.session_name}: Finished '
                 f"upserting table 'user'.")
+
+    async def update_messages(
+            self,
+            handler: DataHandler,
+            channels_df: pd.DataFrame,
+            *,
+            all_messages: bool = False) -> None:
+        # Tuple of key database columns; each change of a value in one
+        # of these columns will be preserved -- a row with the new value
+        # will be inserted in a new position, leaving the row with the
+        # old value at the place.
+        key_cols_all = (
+                '_', 'id', 'peer_id', 'date', 'message', 'mentioned', 'post',
+                'pinned', 'from_id', 'saved_peer_id', 'fwd_from',
+                'via_bot_id', 'via_business_bot_id', 'edit_date',
+                'post_author', 'service', 'active')
+        channel_full_info = True if '__full' in channels_df.columns else False
+        if all_messages:
+            df_orig = await handler.get_all_messages_frame(channels_df)
+        else:
+            messages_stored_df = await self._get_stored_messages_frame()
+            df_orig = await handler.get_new_messages_frame(
+                    channels_df=channels_df,
+                    messages_df=messages_stored_df)
+        df = self._encode_for_sqlite(df=df_orig)
+        key_cols = tuple(col for col in df.columns if col in key_cols_all)
+        async with self.db.cursor() as cur:
+            await self._upsert_table(
+                    table='message',
+                    df=df,
+                    key_cols=key_cols,
+                    cursor=cur)
+            if all_messages and channel_full_info:
+                await self._disactivate_old_rows(
+                        table='message',
+                        service=handler.service_name,
+                        session=handler.session_name,
+                        cursor=cur)
+        await self.db.commit()
+        logger.info(
+                f'{handler.service_name}/{handler.session_name}: Finished '
+                f"upserting table 'message'.")
 
     async def _create_table(
             self,
@@ -404,6 +446,30 @@ class DatabaseUpdater:
             if virtual_cursor:
                 await cursor.close()
 
+    async def _get_stored_messages_frame(self) -> pd.DataFrame:
+        select_sql = f'''
+        SELECT id, peer_id, active, date_saved
+        FROM message
+        WHERE active = TRUE
+        '''
+        async with self.db.cursor() as cur:
+            try:
+                await cur.execute(sql=select_sql)
+            except OperationalError as e:
+                if 'no such table' in str(e):
+                    return None
+                else:
+                    raise
+            else:
+                result_messages = await cur.fetchall()
+                df = pd.DataFrame(
+                        data=result_messages,
+                        columns=[desc[0] for desc in cur.description])
+                df['date_saved'] = (
+                        df['date_saved']
+                        .apply(datetime.datetime.fromisoformat))
+                return df.convert_dtypes()
+
     @staticmethod
     def _find_key_cols_full(key_cols: list | tuple) -> list | tuple:
         try:
@@ -521,6 +587,16 @@ async def process_session(
                                 f'{service_name}/{session_name}: '
                                 f'{type(e).__name__}: Cannot update '
                                 f"table 'user' in the database: {e}.")
+                    try:
+                        await updater.update_messages(
+                                handler=handler,
+                                channels_df=channels_df,
+                                all_messages=False)
+                    except aiosqlite.Error as e:
+                        logger.error(
+                                f'{service_name}/{session_name}: '
+                                f'{type(e).__name__}: Cannot update '
+                                f"table 'message' in the database: {e}.")
 
 async def main() -> None:
     config_fpath = 'config.json'
