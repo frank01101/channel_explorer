@@ -26,7 +26,7 @@ Requirements:
 __author__ = 'Franciszek Humieja'
 __copyright__ = 'Copyright (c) 2025 Franciszek Humieja'
 __license__ = 'MIT'
-__version__ = '1.1.0'
+__version__ = '1.1.1'
 
 import asyncio
 import logging
@@ -43,7 +43,7 @@ from telethon.tl.types.users import UserFull
 from telethon.tl.custom.dialog import Dialog
 from telethon.hints import EntityLike
 from telethon.helpers import TotalList
-from telethon.errors import RPCError
+from telethon.errors import RPCError, ChatAdminRequiredError
 
 # Local logger
 logger = logging.getLogger(__name__)
@@ -498,9 +498,15 @@ class TelegramReader:
                         f'{self.session_name}: {type(e).__name__}: '
                         f'Could not retrieve dialog id for given entity.')
                 dialog_id = None
-            logger.error(
-                    f'{self.session_name}: {type(error).__name__}: '
-                    f'{dialog_id=}: Error while {context}: {error}')
+            if isinstance(error, ChatAdminRequiredError):
+                logger.warning(
+                        f'{self.session_name}: {type(error).__name__}: '
+                        f'{dialog_id=}: Error while {context}: Chat admin '
+                        'privileges are required.')
+            else:
+                logger.error(
+                        f'{self.session_name}: {type(error).__name__}: '
+                        f'{dialog_id=}: Error while {context}: {error}')
         else:
             logger.error(
                     f'{self.session_name}: {type(error).__name__}: '
