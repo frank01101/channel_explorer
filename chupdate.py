@@ -5,7 +5,7 @@
 __author__ = 'Franciszek Humieja'
 __copyright__ = 'Copyright (c) 2025 Franciszek Humieja'
 __license__ = 'MIT'
-__version__ = '0.4.0'
+__version__ = '0.4.1'
 
 import asyncio
 import aiosqlite
@@ -15,6 +15,7 @@ from sqlite3 import Cursor
 import pandas as pd
 from numpy import dtype as np_dtype
 import logging
+import traceback
 import json
 import base64
 import datetime
@@ -36,6 +37,7 @@ DataHandler = (TelegramDataHandler | WhatsAppDataHandler | SignalDataHandler |
 class DatabaseUpdater:
     def __init__(self, db_path: str):
         self._db_path = db_path
+        self._lock = asyncio.Lock()
         self.db = None
 
     async def __aenter__(self):
@@ -88,36 +90,38 @@ class DatabaseUpdater:
         full_info = True if '__full' in channels_df.columns else False
         df = self._encode_for_sqlite(df=channels_df)
         key_cols = tuple(col for col in df.columns if col in key_cols_all)
-        async with self.db.cursor() as cur:
-            await self._upsert_table(
-                    table='channel',
-                    df=df.drop(columns='date_joined'),
-                    key_cols=key_cols,
-                    cursor=cur)
-            if full_info:
-                await self._disactivate_old_rows(
+        async with self._lock:
+            async with self.db.cursor() as cur:
+                await self._upsert_table(
                         table='channel',
-                        service=handler.service_name,
-                        session=handler.session_name,
+                        df=df.drop(columns='date_joined'),
+                        key_cols=key_cols,
                         cursor=cur)
-            await self._upsert_table(
-                    table='channel_session',
-                    df=df[[
-                        'id', 'date_joined', 'session', 'service', 'active',
-                        'date_saved']],
-                    key_cols=(
-                        'id', 'date_joined', 'session', 'service', 'active'),
-                    cursor=cur)
-            if full_info:
-                await self._disactivate_old_rows(
+                if full_info:
+                    await self._disactivate_old_rows(
+                            table='channel',
+                            service=handler.service_name,
+                            session=handler.session_name,
+                            cursor=cur)
+                await self._upsert_table(
                         table='channel_session',
-                        service=handler.service_name,
-                        session=handler.session_name,
+                        df=df[[
+                            'id', 'date_joined', 'session', 'service',
+                            'active', 'date_saved']],
+                        key_cols=(
+                            'id', 'date_joined', 'session', 'service',
+                            'active'),
                         cursor=cur)
-        await self.db.commit()
-        logger.info(
-                f'{handler.service_name}/{handler.session_name}: Finished '
-                f"upserting table 'channel'.")
+                if full_info:
+                    await self._disactivate_old_rows(
+                            table='channel_session',
+                            service=handler.service_name,
+                            session=handler.session_name,
+                            cursor=cur)
+            await self.db.commit()
+            logger.info(
+                    f'{handler.service_name}/{handler.session_name}: '
+                    f"Finished upserting table 'channel'.")
 
     async def update_users(
             self,
@@ -160,46 +164,47 @@ class DatabaseUpdater:
                 col for col in df.columns if col in cols_exclude_all]
         cols_session = [
                 col for col in df.columns if col in cols_session_all]
-        async with self.db.cursor() as cur:
-            await self._upsert_table(
-                    table='user',
-                    df=df.drop(columns=cols_exclude),
-                    key_cols=key_cols,
-                    cursor=cur)
-            if channel_full_info:
-                await self._disactivate_old_rows(
+        async with self._lock:
+            async with self.db.cursor() as cur:
+                await self._upsert_table(
                         table='user',
-                        service=handler.service_name,
-                        session=handler.session_name,
+                        df=df.drop(columns=cols_exclude),
+                        key_cols=key_cols,
                         cursor=cur)
-            await self._upsert_table(
-                    table='user_session',
-                    df=df[cols_session],
-                    key_cols=tuple(
-                        col for col in cols_session if col not in
-                        ('blocked', 'date_saved', 'date_saved_full')),
-                    cursor=cur)
-            if channel_full_info:
-                await self._disactivate_old_rows(
+                if channel_full_info:
+                    await self._disactivate_old_rows(
+                            table='user',
+                            service=handler.service_name,
+                            session=handler.session_name,
+                            cursor=cur)
+                await self._upsert_table(
                         table='user_session',
-                        service=handler.service_name,
-                        session=handler.session_name,
+                        df=df[cols_session],
+                        key_cols=tuple(
+                            col for col in cols_session if col not in
+                            ('blocked', 'date_saved', 'date_saved_full')),
                         cursor=cur)
-            await self._upsert_table(
-                    table='user_channel',
-                    df=df_users_channels,
-                    key_cols=('id', 'channel', 'service', 'active'),
-                    cursor=cur)
-            if channel_full_info:
-                await self._disactivate_old_rows(
+                if channel_full_info:
+                    await self._disactivate_old_rows(
+                            table='user_session',
+                            service=handler.service_name,
+                            session=handler.session_name,
+                            cursor=cur)
+                await self._upsert_table(
                         table='user_channel',
-                        service=handler.service_name,
-                        session=handler.session_name,
+                        df=df_users_channels,
+                        key_cols=('id', 'channel', 'service', 'active'),
                         cursor=cur)
-        await self.db.commit()
-        logger.info(
-                f'{handler.service_name}/{handler.session_name}: Finished '
-                f"upserting table 'user'.")
+                if channel_full_info:
+                    await self._disactivate_old_rows(
+                            table='user_channel',
+                            service=handler.service_name,
+                            session=handler.session_name,
+                            cursor=cur)
+            await self.db.commit()
+            logger.info(
+                    f'{handler.service_name}/{handler.session_name}: '
+                    f"Finished upserting table 'user'.")
 
     async def update_messages(
             self,
@@ -226,22 +231,23 @@ class DatabaseUpdater:
                     messages_df=messages_stored_df)
         df = self._encode_for_sqlite(df=df_orig)
         key_cols = tuple(col for col in df.columns if col in key_cols_all)
-        async with self.db.cursor() as cur:
-            await self._upsert_table(
-                    table='message',
-                    df=df,
-                    key_cols=key_cols,
-                    cursor=cur)
-            if all_messages and channel_full_info:
-                await self._disactivate_old_rows(
+        async with self._lock:
+            async with self.db.cursor() as cur:
+                await self._upsert_table(
                         table='message',
-                        service=handler.service_name,
-                        session=handler.session_name,
+                        df=df,
+                        key_cols=key_cols,
                         cursor=cur)
-        await self.db.commit()
-        logger.info(
-                f'{handler.service_name}/{handler.session_name}: Finished '
-                f"upserting table 'message'.")
+                if all_messages and channel_full_info:
+                    await self._disactivate_old_rows(
+                            table='message',
+                            service=handler.service_name,
+                            session=handler.session_name,
+                            cursor=cur)
+            await self.db.commit()
+            logger.info(
+                    f'{handler.service_name}/{handler.session_name}: '
+                    f"Finished upserting table 'message'.")
 
     async def _create_table(
             self,
@@ -284,8 +290,6 @@ class DatabaseUpdater:
         if virtual_cursor:
             cursor = await self.db.cursor()
         try:
-            logger.debug(create_sql)
-            logger.debug(unique_sql)
             await cursor.execute(sql=create_sql)
             if key_cols is not None:
                 await cursor.execute(sql=unique_sql)
@@ -360,7 +364,6 @@ class DatabaseUpdater:
                         .values
                         .tolist())
                 try:
-                    logger.debug(pre_disactivate_sql())
                     await cursor.executemany(
                             sql=pre_disactivate_sql(),
                             parameters=rows_key_cols)
@@ -368,7 +371,6 @@ class DatabaseUpdater:
                             f'Table {table!r}: Premarked {cursor.rowcount} '
                             'rows as inactive.')
                 except IntegrityError:
-                    logger.debug(pre_disactivate_sql('NULL'))
                     await cursor.executemany(
                             sql=pre_disactivate_sql(active_val='NULL'),
                             parameters=rows_key_cols)
@@ -379,7 +381,6 @@ class DatabaseUpdater:
             # SQLite does not provide support for RETURNING in the
             # Cursor.executemany() method. This is why a loop is used
             # here to gather upserted row ids in a list.
-            logger.debug(upsert_sql)
             for row in df.values.tolist():
                 await cursor.execute(sql=upsert_sql, parameters=row)
                 upsert_result = await cursor.fetchone()
@@ -570,33 +571,34 @@ async def process_session(
                     channels_df = await handler.get_all_channels_frame(
                             full_info=True)
                     try:
-                        await updater.update_channels(
-                                handler=handler, channels_df=channels_df)
-                    except aiosqlite.Error as e:
-                        logger.error(
-                                f'{service_name}/{session_name}: '
-                                f'{type(e).__name__}: Cannot update '
-                                f"table 'channel' in the database: {e}.")
-                    try:
-                        await updater.update_users(
-                                handler=handler,
-                                channels_df=channels_df,
-                                full_info=False)
-                    except aiosqlite.Error as e:
-                        logger.error(
-                                f'{service_name}/{session_name}: '
-                                f'{type(e).__name__}: Cannot update '
-                                f"table 'user' in the database: {e}.")
-                    try:
-                        await updater.update_messages(
-                                handler=handler,
-                                channels_df=channels_df,
-                                all_messages=False)
-                    except aiosqlite.Error as e:
-                        logger.error(
-                                f'{service_name}/{session_name}: '
-                                f'{type(e).__name__}: Cannot update '
-                                f"table 'message' in the database: {e}.")
+                        async with asyncio.TaskGroup() as tg:
+                            tg.create_task(updater.update_channels(
+                                    handler=handler,
+                                    channels_df=channels_df))
+                            tg.create_task(updater.update_users(
+                                    handler=handler,
+                                    channels_df=channels_df,
+                                    full_info=False))
+                            tg.create_task(updater.update_messages(
+                                    handler=handler,
+                                    channels_df=channels_df,
+                                    all_messages=False))
+                    except* aiosqlite.Error as e_group:
+                        for e in e_group.exceptions:
+                            tb = e.__traceback__
+                            first_tb_frame = traceback.extract_tb(tb)[0]
+                            if first_tb_frame.name == 'update_channels':
+                                table = 'channel'
+                            elif first_tb_frame.name == 'update_users':
+                                table = 'user'
+                            elif first_tb_frame.name == 'update_messages':
+                                table = 'message'
+                            else:
+                                table = None
+                            logger.error(
+                                    f'{service_name}/{session_name}: '
+                                    f'{type(e).__name__}: Cannot update '
+                                    f"table {table!r} in the database: {e}.")
 
 async def main() -> None:
     config_fpath = 'config.json'
