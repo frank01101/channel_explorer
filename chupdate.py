@@ -5,7 +5,7 @@
 __author__ = 'Franciszek Humieja'
 __copyright__ = 'Copyright (c) 2025 Franciszek Humieja'
 __license__ = 'MIT'
-__version__ = '0.4.2'
+__version__ = '0.4.3'
 
 import asyncio
 import aiosqlite
@@ -141,8 +141,7 @@ class DatabaseUpdater:
                 'fake', 'premium', 'bot_business', 'first_name', 'last_name',
                 'username', 'phone', '__full', 'about',
                 'business_greeting_message', 'business_away_message',
-                'business_intro', 'birthday', 'personal_channel_id',
-                'service', 'active')
+                'birthday', 'personal_channel_id', 'service', 'active')
         cols_exclude_all = (
                 'is_self', 'contact', 'mutual_contact', 'close_friend',
                 'blocked', 'channels')
@@ -392,47 +391,38 @@ class DatabaseUpdater:
                 raise
         else:
             pre_count_result = await cur_count.fetchone()
-            if key_cols_full:
-                rows_key_cols = (
-                        df
-                        .loc[:, key_cols_basic + key_cols_full]
-                        .values
-                        .tolist())
-                try:
+            try:
+                if key_cols_full:
+                    rows_key_cols = (
+                            df
+                            .loc[:, key_cols_basic + key_cols_full]
+                            .values
+                            .tolist())
                     await cursor.executemany(
                             sql=pre_disactivate_sql(),
                             parameters=rows_key_cols)
                     logger.info(
                             f'Table {table!r}: Premarked {cursor.rowcount} '
                             'rows as inactive.')
-                except IntegrityError:
-                    await cursor.executemany(
-                            sql=pre_disactivate_sql(active_val='NULL'),
-                            parameters=rows_key_cols)
-                    logger.info(
-                            f'Table {table!r}: Premarked {cursor.rowcount} '
-                            'rows as inactive (with NULL value for '
-                            'uniqueness integrity).')
-            try:
-                # SQLite does not provide support for RETURNING in the
-                # Cursor.executemany() method. This is why a loop is used
-                # here to gather upserted row ids in a list.
-                for row in df.values.tolist():
-                    await cursor.execute(sql=upsert_sql, parameters=row)
-                    upsert_result = await cursor.fetchone()
-                    if upsert_result:
-                        upserted_rows.append(upsert_result[0])
+            except IntegrityError:
+                await cursor.executemany(
+                        sql=pre_disactivate_sql(active_val='NULL'),
+                        parameters=rows_key_cols)
+                logger.info(
+                        f'Table {table!r}: Premarked {cursor.rowcount} '
+                        'rows as inactive (with NULL value for '
+                        'uniqueness integrity).')
             except OperationalError as e:
-                if 'has no column' in str(e):
+                if 'no such column' in str(e):
                     missing_col = str(e).split(' ')[-1]
                     logger.warning(
-                            f'Table {table!r} does not have column named '
-                            f'{missing_col!r}. The new column is being '
-                            'added...')
+                            f'Table {table!r} does not have key column '
+                            f'named {missing_col!r}. The new column is '
+                            'being added...')
                     await self._add_column(
                             table=table,
                             name=missing_col,
-                            dtype=df.dtypes[missing_col],
+                            dtype=df.convert_dtypes().dtypes[missing_col],
                             cursor=cursor)
                     await self._upsert_table(
                             table=table,
@@ -442,25 +432,55 @@ class DatabaseUpdater:
                 else:
                     raise
             else:
-                await cur_count.execute(f'SELECT COUNT(*) FROM {table}')
-                post_count_result = await cur_count.fetchone()
-                n_inserted_rows = post_count_result[0] - pre_count_result[0]
-                logger.info(
-                        f'Table {table!r}: Inserted {n_inserted_rows} rows '
-                        f'and updated {len(upserted_rows)-n_inserted_rows} '
-                        'rows.')
-                if not virtual_cursor:
-                    # Since the aim is to store upserted row ids as
-                    # cursor parameters (as it would have been, if
-                    # RETURNING could be used in Cursor.executemany()),
-                    # we save it there using SELECT.
-                    select_sql = f'''
-                    SELECT rowid
-                    FROM {table}
-                    WHERE rowid IN ({', '.join('?'*len(upserted_rows))})
-                    '''
-                    await cursor.execute(
-                            sql=select_sql, parameters=upserted_rows)
+                try:
+                    # SQLite does not provide support for RETURNING in the
+                    # Cursor.executemany() method. This is why a loop is used
+                    # here to gather upserted row ids in a list.
+                    for row in df.values.tolist():
+                        await cursor.execute(sql=upsert_sql, parameters=row)
+                        upsert_result = await cursor.fetchone()
+                        if upsert_result:
+                            upserted_rows.append(upsert_result[0])
+                except OperationalError as e:
+                    if 'has no column' in str(e):
+                        missing_col = str(e).split(' ')[-1]
+                        logger.warning(
+                                f'Table {table!r} does not have column named '
+                                f'{missing_col!r}. The new column is being '
+                                'added...')
+                        await self._add_column(
+                                table=table,
+                                name=missing_col,
+                                dtype=df.convert_dtypes().dtypes[missing_col],
+                                cursor=cursor)
+                        await self._upsert_table(
+                                table=table,
+                                df=df,
+                                key_cols=key_cols,
+                                cursor=cursor)
+                    else:
+                        raise
+                else:
+                    await cur_count.execute(f'SELECT COUNT(*) FROM {table}')
+                    post_count_result = await cur_count.fetchone()
+                    n_inserted_rows = (
+                            post_count_result[0] - pre_count_result[0])
+                    logger.info(
+                            f'Table {table!r}: Inserted {n_inserted_rows} '
+                            'rows and updated '
+                            f'{len(upserted_rows)-n_inserted_rows} rows.')
+                    if not virtual_cursor:
+                        # Since the aim is to store upserted row ids as
+                        # cursor parameters (as it would have been, if
+                        # RETURNING could be used in Cursor.executemany()),
+                        # we save it there using SELECT.
+                        select_sql = f'''
+                        SELECT rowid
+                        FROM {table}
+                        WHERE rowid IN ({', '.join('?'*len(upserted_rows))})
+                        '''
+                        await cursor.execute(
+                                sql=select_sql, parameters=upserted_rows)
         finally:
             await cur_count.close()
             if virtual_cursor:
