@@ -26,7 +26,7 @@ Requirements:
 __author__ = 'Franciszek Humieja'
 __copyright__ = 'Copyright (c) 2025 Franciszek Humieja'
 __license__ = 'MIT'
-__version__ = '1.1.1'
+__version__ = '1.1.2'
 
 import asyncio
 import logging
@@ -297,6 +297,10 @@ class TelegramReader:
         """
         known_ids = known_ids or []
         save_dates = save_dates or []
+        try:
+            min_id = int(min_id)
+        except (TypeError, ValueError):
+            min_id = 0
         messages = []
         edited_count = 0
         try:
@@ -322,12 +326,20 @@ class TelegramReader:
         except Exception as e:
             await self._log_error(
                     error=e, context='fetching new messages', dialog=dialog)
+        try:
+            dialog_id = await self.client.get_peer_id(peer=dialog)
+        except Exception as e:
+            logger.warning(
+                    f'{self.session_name}: {type(e).__name__}: '
+                    f'Could not retrieve dialog id for given entity.')
+            dialog_id = None
         logger.info(
                 f'{self.session_name}: '
                 + (f'Search for ”{search}“: '
                 if isinstance(search, str) and search else '')
                 + f'Retrieved {len(messages) - edited_count} new and '
-                f'{edited_count} updated messages from the dialog.')
+                f'{edited_count} updated messages from the dialog: '
+                f'{dialog_id}.')
         return messages
 
     async def get_all_messages(
@@ -357,12 +369,19 @@ class TelegramReader:
         try:
             messages = await self.client.get_messages(
                     entity=dialog, limit=limit, search=search)
+            try:
+                dialog_id = await self.client.get_peer_id(peer=dialog)
+            except Exception as e:
+                logger.warning(
+                        f'{self.session_name}: {type(e).__name__}: '
+                        f'Could not retrieve dialog id for given entity.')
+                dialog_id = None
             logger.info(
                     f'{self.session_name}: '
                     + (f'Search for ”{search}“: '
                     if isinstance(search, str) and search else '')
                     + f'Retrieved {len(messages)} out of {messages.total} '
-                    'available messages from the dialog.')
+                    f'available messages from the dialog: {dialog_id}.')
             return messages
         except Exception as e:
             await self._log_error(
@@ -405,10 +424,17 @@ class TelegramReader:
             participants = await self.client.get_participants(entity=dialog)
             for user in participants:
                 user.channel = await self.client.get_peer_id(peer=dialog)
+            try:
+                dialog_id = await self.client.get_peer_id(peer=dialog)
+            except Exception as e:
+                logger.warning(
+                        f'{self.session_name}: {type(e).__name__}: '
+                        f'Could not retrieve dialog id for given entity.')
+                dialog_id = None
             logger.info(
                     f'{self.session_name}: Retrieved {len(participants)} '
                     f'out of {participants.total} available participants '
-                    'from the dialog.')
+                    f'from the dialog: {dialog_id}.')
             return participants
         except Exception as e:
             await self._log_error(
