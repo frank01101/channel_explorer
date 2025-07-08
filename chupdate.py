@@ -5,7 +5,7 @@
 __author__ = 'Franciszek Humieja'
 __copyright__ = 'Copyright (c) 2025 Franciszek Humieja'
 __license__ = 'MIT'
-__version__ = '0.4.3'
+__version__ = '0.5.0'
 
 import asyncio
 import aiosqlite
@@ -35,6 +35,9 @@ DataHandler = (TelegramDataHandler | WhatsAppDataHandler | SignalDataHandler |
 
 
 class DatabaseUpdater:
+    # The SQLite limit of variables in a query.
+    max_sqlite_variables = 250000
+
     def __init__(self, db_path: str):
         self._db_path = db_path
         self._lock = asyncio.Lock()
@@ -124,7 +127,7 @@ class DatabaseUpdater:
             await self.db.commit()
             logger.info(
                     f'{handler.service_name}/{handler.session_name}: '
-                    f"Finished upserting table 'channel'.")
+                    f"Committed changes to table 'channel'.")
 
     async def update_users(
             self,
@@ -209,14 +212,15 @@ class DatabaseUpdater:
             await self.db.commit()
             logger.info(
                     f'{handler.service_name}/{handler.session_name}: '
-                    f"Finished upserting table 'user'.")
+                    f"Committed changes to table 'user'.")
 
     async def update_messages(
             self,
             handler: DataHandler,
             channels_df: pd.DataFrame,
             *,
-            all_messages: bool = False) -> None:
+            all_messages: bool = False,
+            all_messages_limit: int = None) -> None:
         # Tuple of key database columns; each change of a value in one
         # of these columns will be preserved -- a row with the new value
         # will be inserted in a new position, leaving the row with the
@@ -228,7 +232,8 @@ class DatabaseUpdater:
                 'post_author', 'service', 'active')
         channel_full_info = True if '__full' in channels_df.columns else False
         if all_messages:
-            df_orig = await handler.get_all_messages_frame(channels_df)
+            df_orig = await handler.get_all_messages_frame(
+                    channels_df, limit=all_messages_limit)
         else:
             messages_stored_df = await self._get_stored_messages_frame()
             df_orig = await handler.get_new_messages_frame(
@@ -251,11 +256,12 @@ class DatabaseUpdater:
                             table='message',
                             service=handler.service_name,
                             session=handler.session_name,
-                            cursor=cur)
+                            cursor=cur,
+                            limit=all_messages_limit)
             await self.db.commit()
             logger.info(
                     f'{handler.service_name}/{handler.session_name}: '
-                    f"Finished upserting table 'message'.")
+                    f"Committed changes to table 'message'.")
 
     async def _create_table(
             self,
@@ -469,7 +475,8 @@ class DatabaseUpdater:
                             f'Table {table!r}: Inserted {n_inserted_rows} '
                             'rows and updated '
                             f'{len(upserted_rows)-n_inserted_rows} rows.')
-                    if not virtual_cursor:
+                    if (not virtual_cursor
+                        and len(upserted_rows) <= self.max_sqlite_variables):
                         # Since the aim is to store upserted row ids as
                         # cursor parameters (as it would have been, if
                         # RETURNING could be used in Cursor.executemany()),
@@ -492,12 +499,23 @@ class DatabaseUpdater:
             service: str,
             session: str,
             *,
-            cursor: Cursor = None) -> None:
+            cursor: Cursor = None,
+            limit: int = None) -> None:
         virtual_cursor = True if not cursor else False
         if virtual_cursor:
             cursor = await self.db.cursor()
         rows_result = await cursor.fetchall()
         upserted_rows = tuple(row[0] for row in rows_result)
+        if limit:
+            rows_within_limit = await self._get_rows_within_limit(limit=limit)
+            n_limit_rows_allowed = (
+                    self.max_sqlite_variables - len(upserted_rows) - 2)
+            if len(rows_within_limit) > n_limit_rows_allowed:
+                # Prevent the following SQL to exceed the built-in limit
+                # of variable number.
+                rows_within_limit = rows_within_limit[:n_limit_rows_allowed]
+        else:
+            rows_within_limit = tuple()
         def update_sql(active_val: str = 'FALSE') -> str:
             return f'''
             UPDATE {table}
@@ -506,18 +524,23 @@ class DatabaseUpdater:
                 AND rowid NOT IN ({', '.join('?'*len(upserted_rows))})
                 AND service = ?
                 AND session = ?
+                {f'AND rowid IN ({', '.join('?'*len(rows_within_limit))})'
+                 if limit else ''}
             '''
         try:
-            await cursor.execute(
-                    sql=update_sql(),
-                    parameters=(*upserted_rows, service, session))
-            logger.info(
-                    f'Table {table!r}: Marked {cursor.rowcount} rows '
-                    'as inactive.')
+            if upserted_rows:
+                await cursor.execute(
+                        sql=update_sql(),
+                        parameters=(*upserted_rows, service, session,
+                                    *rows_within_limit))
+                logger.info(
+                        f'Table {table!r}: Marked {cursor.rowcount} rows '
+                        'as inactive.')
         except IntegrityError:
             await cursor.execute(
                     sql=update_sql(active_val='NULL'),
-                    parameters=(*upserted_rows, service, session))
+                    parameters=(*upserted_rows, service, session,
+                                *rows_within_limit))
             logger.info(
                     f'Table {table!r}: Marked {cursor.rowcount} rows '
                     'as inactive (with NULL value for uniqueness integrity).')
@@ -548,6 +571,26 @@ class DatabaseUpdater:
                         df['date_saved']
                         .apply(datetime.datetime.fromisoformat))
                 return df.convert_dtypes()
+
+    async def _get_rows_within_limit(self, limit: int) -> tuple[int]:
+        async with self.db.cursor() as cur:
+            await cur.execute('SELECT id FROM channel')
+            channels_result = await cur.fetchall()
+            channels = tuple(res[0] for res in channels_result)
+            rowids = []
+            for channel in channels:
+                select_messages_sql = f'''
+                SELECT rowid
+                FROM message
+                WHERE peer_id = {channel}
+                ORDER BY id DESC
+                LIMIT {limit}
+                '''
+                await cur.execute(select_messages_sql)
+                messages_result = await cur.fetchall()
+                for res in messages_result:
+                    rowids.append(res[0])
+        return rowids
 
     @staticmethod
     def _find_key_cols_full(key_cols: list | tuple) -> list | tuple:
@@ -660,7 +703,8 @@ async def process_session(
                             tg.create_task(updater.update_messages(
                                     handler=handler,
                                     channels_df=channels_df,
-                                    all_messages=False))
+                                    all_messages=True,
+                                    all_messages_limit=3000))
                     except* aiosqlite.Error as e_group:
                         for e in e_group.exceptions:
                             tb = e.__traceback__
