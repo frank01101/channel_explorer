@@ -26,7 +26,7 @@ Requirements:
 __author__ = 'Franciszek Humieja'
 __copyright__ = 'Copyright (c) 2025 Franciszek Humieja'
 __license__ = 'MIT'
-__version__ = '1.1.2'
+__version__ = '1.1.3'
 
 import asyncio
 import logging
@@ -61,6 +61,10 @@ class TelegramReader:
     Public attributes:
     client (TelegramClient):
         The Telethon client instance used for API access.
+    service_name (str):
+        The name of the messaging service (i.e., 'telegram')
+    session_name (str):
+        The name of the session (connection by a given Telegram user)
     ----------
     Public methods:
         start(): Starts the Telegram client asynchronously.
