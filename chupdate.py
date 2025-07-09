@@ -1,11 +1,35 @@
 #!/usr/bin/env python
 
-"""chupdate.py"""
+"""chupdate.py: Messaging Database Updater
+
+This program fetches data from messaging services (Telegram, WhatsApp,
+Signal, Messenger), including information about channels, users and
+messages. It updates a local SQLite database asynchronously with the
+fetched data, ensuring proper deduplication, upsert logic, and conflict
+resolution. The script supports configurable fetch depth and session
+handling.
+
+Usage:
+    Run the script from the command line with appropriate arguments for
+    desired fetch depth.
+
+Classes:
+    DatabaseUpdater:
+        Establishes connection to the database and performs
+        asynchronous updates of channel, user and message tables.
+
+Requirements:
+    - pandas
+    - numpy
+    - aiosqlite
+    - JSON configuration file with session and API credentials
+    - data handling modules for appropriate messaging services
+"""
 
 __author__ = 'Franciszek Humieja'
 __copyright__ = 'Copyright (c) 2025 Franciszek Humieja'
 __license__ = 'MIT'
-__version__ = '0.5.0'
+__version__ = '1.0.0'
 
 import asyncio
 import aiosqlite
@@ -20,6 +44,7 @@ import json
 import base64
 import datetime
 from typing import get_args
+import argparse
 
 from tgdata import TelegramDataHandler
 from wadata import WhatsAppDataHandler
@@ -35,8 +60,59 @@ DataHandler = (TelegramDataHandler | WhatsAppDataHandler | SignalDataHandler |
 
 
 class DatabaseUpdater:
+    """Asynchronous handler for safely updating an SQLite database with
+    structured data from messaging services. Supports table creation,
+    schema evolution and upserts.
+    ----------
+    The updater ensures data consistency by deactivating outdated rows
+    (with `active = FALSE`) and inserting new rows with updated
+    information. It uses async locks to maintain concurrency safety and
+    supports structured table versioning logic based on session and
+    service identifiers.
+    ----------
+    Public attributes:
+        db (aiosqlite.Connection):
+            The active database connection object.
+        max_sql_variables (int):
+            SQLite maximum number of variables in a single query.
+    ----------
+    Public methods:
+        start(): Starts the connection to the database.
+        stop(): Stops the connection to the database.
+        update_channels(): Updates tables 'channel' and
+            'channel_session' with retrieved channel info.
+        update_users(): Updates tables 'user', 'user_session' and
+            'user_channel' with retrieved user info.
+        update_messages(): Updates table 'message' with retrieved
+            message info.
+    ----------
+    Example:
+        import aiosqlite
+        from chupdate import DatabaseUpdater
+        from wadata import WhatsAppDataHandler
+        ----------
+        async with WhatsAppDataHandler('sess', 123, 'ab12') as handler:
+            channels = handler.get_all_channels_frame()
+            async with DatabaseUpdater('database.db') as updater:
+                await updater.update_channels(handler, channels)
+                await updater.update_users(handler, channels)
+                await updater.update_messages(
+                        handler,
+                        channels,
+                        all_messages=True,
+                        all_messages_limit=3000)
+                async with updater.db.cursor() as cursor:
+                    await cursor.execute('''
+                            SELECT COUNT(*)
+                            FROM message
+                            WHERE peer_id = 78473
+                            ''')
+                    result = await cursor.fetchone()
+                n_messages = result[0]
+    """
+
     # The SQLite limit of variables in a query.
-    max_sqlite_variables = 250000
+    max_sql_variables = 250000
 
     def __init__(self, db_path: str):
         self._db_path = db_path
@@ -51,7 +127,10 @@ class DatabaseUpdater:
         await self.stop()
 
     async def start(self):
-        """Connects to the database asynchronously."""
+        """Opens an asynchronous connection to the SQLite database and
+        sets it to WAL (Write-Ahead Logging) mode for better concurrency
+        performance.
+        """
         try:
             self.db = await aiosqlite.connect(database=self._db_path)
         except (OperationalError, DatabaseError) as e:
@@ -65,7 +144,9 @@ class DatabaseUpdater:
                     f'Opened the connection to the database {self._db_path!r}')
 
     async def stop(self):
-        """Closes connection to the database asynchronously."""
+        """Closes the database connection and logs the total number of
+        changes made during the session.
+        """
         total_changes = self.db.total_changes
         try:
             await self.db.close()
@@ -81,6 +162,22 @@ class DatabaseUpdater:
 
     async def update_channels(
             self, handler: DataHandler, channels_df: pd.DataFrame) -> None:
+        """Upserts channel and session-channel data into the database.
+        ----------
+        If full channel information is available (this may bring more
+        information -- for example comment discussions in Telegram
+        broadcast channels), outdated rows are deactivated (with
+        active = FALSE) for the sake of preserving historical state.
+        ----------
+        Arguments:
+        handler: tgdata.TelegramDataHandler |
+                 wadata.WhatsAppDataHandler |
+                 sgdata.SignalDataHandler |
+                 msdata.MessengerDataHandler
+            The data handler instance.
+        channels_df: pandas.DataFrame
+            The dataframe containing channel metadata to be upserted.
+        """
         # Tuple of key database columns; each change of a value in one
         # of these columns will be preserved -- a row with the new value
         # will be inserted in a new position, leaving the row with the
@@ -135,6 +232,25 @@ class DatabaseUpdater:
             channels_df: pd.DataFrame,
             *,
             full_info: bool = False) -> None:
+        """Upserts user, user-session and user-channel data into the
+        database.
+        ----------
+        If full channel information is available (this may bring more
+        information -- for example comment discussions in Telegram
+        broadcast channels), outdated rows are deactivated (with
+        active = FALSE) for the sake of preserving historical state.
+        ----------
+        Arguments:
+        handler: tgdata.TelegramDataHandler |
+                 wadata.WhatsAppDataHandler |
+                 sgdata.SignalDataHandler |
+                 msdata.MessengerDataHandler
+            The service handler providing access to user data.
+        channels_df: pandas.DataFrame
+            Dataframe of channel data used to identify scope of users.
+        full_info: bool = False (optional)
+            Whether to fetch and store full user info.
+        """
         # Tuple of key database columns; each change of a value in one
         # of these columns will be preserved -- a row with the new value
         # will be inserted in a new position, leaving the row with the
@@ -145,9 +261,14 @@ class DatabaseUpdater:
                 'username', 'phone', '__full', 'about',
                 'business_greeting_message', 'business_away_message',
                 'birthday', 'personal_channel_id', 'service', 'active')
+        # Tuple of database columns that will not be stored in 'user'
+        # table because the information stored in them can be session-
+        # or channel-dependend. These columns will be saved in
+        # 'user_session' or 'user_channel' tables instead.
         cols_exclude_all = (
                 'is_self', 'contact', 'mutual_contact', 'close_friend',
                 'blocked', 'channels')
+        # Tuple of columns that will be saved in 'user_session' table.
         cols_session_all = (
                 'id', 'is_self', 'contact', 'mutual_contact', 'close_friend',
                 'blocked', 'session', 'service', 'active', 'date_saved',
@@ -221,6 +342,33 @@ class DatabaseUpdater:
             *,
             all_messages: bool = False,
             all_messages_limit: int = None) -> None:
+        """Upserts message data into the database, either incrementally
+        (new + edited messages only) or by fetching the full message
+        history (with possible limit of fetched messages per channel).
+        ----------
+        If all messages are fetched (regardless of limit per channel)
+        and full channel information is available (this may bring more
+        information -- for example comment discussions in Telegram
+        broadcast channels), outdated rows are deactivated (with
+        active = FALSE) for the sake of preserving historical state.
+        ----------
+        Arguments:
+        handler: tgdata.TelegramDataHandler |
+                 wadata.WhatsAppDataHandler |
+                 sgdata.SignalDataHandler |
+                 msdata.MessengerDataHandler
+            Data handler capable of providing message history.
+        channels_df: pandas.DataFrame
+            Dataframe of channels for which messages are updated.
+        all_messages: bool = False (optional)
+            Whether to fetch and update all messages (or all messages
+            within the limit per channel, if all_messages_limit is
+            given) instead of only new and edited ones.
+        all_messages_limit: int = None (optional)
+            If set, limits the number of messages per channel when
+            fetching all messages. If all_messages = False, this
+            argument has no effect.
+        """
         # Tuple of key database columns; each change of a value in one
         # of these columns will be preserved -- a row with the new value
         # will be inserted in a new position, leaving the row with the
@@ -271,6 +419,28 @@ class DatabaseUpdater:
             cols: pd.Index = None,
             key_cols: list | tuple = None,
             cursor: Cursor = None) -> None:
+        """Creates a new table in the database.
+        ----------
+        The schema is inferred from either 'dtypes' or 'cols' and a
+        unique index is created based on provided key columns, excluding
+        selected "full info" keys (because they can be skipped while
+        fetching data).
+        ----------
+        Arguments:
+        name: str
+            Name of the table to create.
+        dtypes: pd.Series = None (optional)
+            Series mapping column names to pandas dtypes (used to
+            determine SQLite types).
+        cols: pd.Index = None (optional)
+            Alternative to 'dtypes' -- used when only column names are
+            known, without the dtypes.
+        key_cols: list | tuple = None (optional)
+            Columns used to define a uniqueness constraint.
+        cursor: sqlite3.Cursor = None (optional)
+            Cursor to use; if not provided, a new one is created
+            internally.
+        """
         virtual_cursor = True if not cursor else False
         key_cols_full = self._find_key_cols_full(key_cols=key_cols)
         columns = []
@@ -319,6 +489,23 @@ class DatabaseUpdater:
             *,
             dtype: np_dtype | pd.api.extensions.ExtensionDtype | str = None,
             cursor: Cursor = None) -> None:
+        """Adds a column to an existing table in the database.
+        ----------
+        Arguments:
+        table: str
+            Name of the table to alter.
+        name: str
+            Name of the new column.
+        dtype: numpy.dtype |
+               pandas.api.extensions.ExtensionDtype |
+               str
+               = None (optional)
+            Pandas or NumPy dtype to determine the corresponding SQLite
+            column type.
+        cursor: sqlite3.Cursor = None (optional)
+            Cursor to use; if not provided, a new one is created
+            internally.
+        """
         virtual_cursor = True if not cursor else False
         if dtype:
             sqlite_type = self._map_dtype(dtype=dtype)
@@ -345,6 +532,35 @@ class DatabaseUpdater:
             key_cols: list | tuple = None,
             *,
             cursor: Cursor = None) -> None:
+        """Upserts data from a DataFrame into the given SQLite table.
+        ----------
+        Handles:
+        - Table creation, if it doesn't exist.
+        - Column addition, if schema mismatch is encountered.
+        - Premarking outdated rows as inactive (active = FALSE) based
+          on "full info" diffs -- the "full info" key columns cannot be
+          added to table's unique index because they may be skipped
+          while fetching data, so the 'ON CONFLICT' clause of upsert
+          does not fully prevents overwriting changes in these columns.
+          This premarking as inactive enables the following upsert
+          operation to preserve historical data with respect to changes
+          in the "full info" columns in the case when the "basic info"
+          columns remain unchanged.
+        - Safe insertion with deduplication using 'ON CONFLICT' clause
+          for "basic info" columns.
+        - Assigning to the cursor rowids of the table where
+          update/insert took place -- which can be utilized further.
+        ----------
+        Arguments:
+        table: str
+            Name of the target database table.
+        df: pandas.DataFrame
+            DataFrame with data to be upserted.
+        key_cols: list | tuple = None (optional)
+            Columns used to determine uniqueness (for upserts).
+        cursor: sqlite3.Cursor = None (optional)
+            Cursor to use; if not provided, a new one is created internally.
+        """
         virtual_cursor = True if not cursor else False
         key_cols_full = tuple(self._find_key_cols_full(key_cols=key_cols))
         key_cols_basic = tuple(
@@ -476,7 +692,7 @@ class DatabaseUpdater:
                             'rows and updated '
                             f'{len(upserted_rows)-n_inserted_rows} rows.')
                     if (not virtual_cursor
-                        and len(upserted_rows) <= self.max_sqlite_variables):
+                        and len(upserted_rows) <= self.max_sql_variables - 2):
                         # Since the aim is to store upserted row ids as
                         # cursor parameters (as it would have been, if
                         # RETURNING could be used in Cursor.executemany()),
@@ -501,6 +717,23 @@ class DatabaseUpdater:
             *,
             cursor: Cursor = None,
             limit: int = None) -> None:
+        """Marks old rows as inactive (active = FALSE) for the given
+        session/service that are not among the recently upserted rows.
+        ----------
+        Arguments:
+        table: str
+            Name of the table to update.
+        service: str
+            Messaging service name (e.g., 'telegram').
+        session: str
+            Session identifier for the account.
+        cursor: sqlite3.Cursor = None (optional)
+            Cursor to use; if not provided, a new one is created
+            internally.
+        limit: int = None (optional)
+            If provided, restricts disactivation to a limited number of
+            rows per channel.
+        """
         virtual_cursor = True if not cursor else False
         if virtual_cursor:
             cursor = await self.db.cursor()
@@ -509,7 +742,7 @@ class DatabaseUpdater:
         if limit:
             rows_within_limit = await self._get_rows_within_limit(limit=limit)
             n_limit_rows_allowed = (
-                    self.max_sqlite_variables - len(upserted_rows) - 2)
+                    self.max_sql_variables - len(upserted_rows) - 2)
             if len(rows_within_limit) > n_limit_rows_allowed:
                 # Prevent the following SQL to exceed the built-in limit
                 # of variable number.
@@ -549,6 +782,16 @@ class DatabaseUpdater:
                 await cursor.close()
 
     async def _get_stored_messages_frame(self) -> pd.DataFrame:
+        """Retrieves a DataFrame of stored messages (active only),
+        including their 'id', 'peer_id', 'active' and 'date_saved'.
+        ----------
+        Such a DataFrame is needed in data handlers to fetch new (not
+        stored) messages.
+        ----------
+        Returns:
+        pandas.DataFrame
+            A DataFrame of existing messages with datetime conversion.
+        """
         select_sql = f'''
         SELECT id, peer_id, active, date_saved
         FROM message
@@ -573,6 +816,19 @@ class DatabaseUpdater:
                 return df.convert_dtypes()
 
     async def _get_rows_within_limit(self, limit: int) -> tuple[int]:
+        """For each channel, selects the most recent 'limit' messages
+        by ID.
+        ----------
+        Used for pruning purposes in message disactivation logic.
+        ----------
+        Arguments:
+        limit: int
+            Number of newest messages to retrieve per channel.
+        ----------
+        Returns:
+        tuple[int]
+            Combined rowids of recent messages across all channels.
+        """
         async with self.db.cursor() as cur:
             await cur.execute('SELECT id FROM channel')
             channels_result = await cur.fetchall()
@@ -594,6 +850,20 @@ class DatabaseUpdater:
 
     @staticmethod
     def _find_key_cols_full(key_cols: list | tuple) -> list | tuple:
+        """Extracts the slice of 'key_cols' corresponding to the "full
+        info" columns.
+        ----------
+        The full info columns are expected to be between '__full' and
+        'service'.
+        ----------
+        Arguments:
+        key_cols: list | tuple
+            The sequence of all key column names.
+        ----------
+        Returns:
+        list | tuple
+            Slice of key columns considered as "full info" keys.
+        """
         try:
             full_start = key_cols.index('__full')
             full_end = key_cols.index('service')
@@ -603,6 +873,19 @@ class DatabaseUpdater:
 
     @staticmethod
     def _encode_for_sqlite(df: pd.DataFrame) -> pd.DataFrame:
+        """Transforms a DataFrame to a SQLite-friendly format:
+        - Serializes dicts/lists to JSON
+        - Encodes bytes to base64
+        - Converts dates and datetimes to ISO strings
+        ----------
+        Arguments:
+        df: pd.DataFrame
+            Input dataframe to be encoded.
+        ----------
+        Returns:
+        pd.DataFrame
+            Encoded dataframe ready for SQLite insertion.
+        """
         def data_encoder(obj):
             def json_encoder(inner_obj):
                 if isinstance(inner_obj, bytes):
@@ -625,6 +908,17 @@ class DatabaseUpdater:
     @staticmethod
     def _map_dtype(
             dtype: np_dtype | pd.api.extensions.ExtensionDtype | str) -> str:
+        """Maps a pandas or NumPy dtype to the corresponding SQLite
+        column type.
+        ----------
+        Parameters:
+        dtype: numpy.dtype | pandas.api.extensions.ExtensionDtype | str
+            The pandas or NumPy dtype to convert.
+        ----------
+        Returns:
+        str
+            SQLite type string (e.g., 'INTEGER', 'TEXT').
+        """
         if pd.api.types.is_integer_dtype(dtype):
             return 'INTEGER'
         elif pd.api.types.is_bool_dtype(dtype):
@@ -640,6 +934,17 @@ class DatabaseUpdater:
     def _map_null_value(
             dtype: np_dtype | pd.api.extensions.ExtensionDtype | str
     ) -> int | float | str:
+        """Provides a default 'null-equivalent' value for the given
+        dtype, used in COALESCE expressions for uniqueness.
+        ----------
+        Parameters:
+        dtype: numpy.dtype | pandas.api.extensions.ExtensionDtype | str
+            The pandas or NumPy dtype to inspect.
+        ----------
+        Returns:
+        int | float | str
+            Fallback value representing "null" for this column type.
+        """
         if pd.api.types.is_integer_dtype(dtype):
             return -1
         elif pd.api.types.is_bool_dtype(dtype):
@@ -654,6 +959,27 @@ def map_data_handler(
         session_name: str,
         api_id: int,
         api_hash: str) -> DataHandler | None:
+    """Maps a service name to the corresponding DataHandler class and
+    instantiates it.
+    ----------
+    Parameters:
+    service_name: str
+        The name of the messaging service (e.g., 'telegram').
+    session_name: str
+        Session identifier for the account.
+    api_id: int
+        The API ID used to authenticate with the service.
+    api_hash: str
+        The API hash used to authenticate with the service.
+    ----------
+    Returns:
+    DataHandler
+        An instance of the appropriate handler subclass.
+    ----------
+    Raises:
+    ValueError
+        If the service name is not recognized.
+    """
     for HandlerCls in get_args(DataHandler):
         if service_name == HandlerCls.service_name:
             return HandlerCls(session_name, api_id, api_hash)
@@ -662,7 +988,33 @@ def map_data_handler(
 async def process_session(
         updater: DatabaseUpdater,
         service_name: str,
-        session_data: dict) -> None:
+        session_data: dict,
+        cmdline_args: argparse.Namespace) -> None:
+    """Orchestrates concurrent update processes for a single session of
+    a messaging service.
+    ----------
+    This includes:
+    - Initializing the appropriate data handler
+    - Fetching channel/user/message data (with options for depth and scope)
+    - Dispatching concurrent update tasks for database insertion
+    ----------
+    Parameters:
+    updater: DatabaseUpdater
+        Active database updater managing the SQLite operations.
+    service_name: str
+        Name of the service for which this session applies.
+    session_data: dict
+        Dictionary with keys: 'session', 'api_id', 'api_hash'.
+    cmdline_args: argparse.Namespace
+        Parsed command-line arguments with flags controlling update
+        behavior.
+    """
+    update_channels = cmdline_args.channels != 'none'
+    full_channels_info = cmdline_args.channels == 'full'
+    update_users = cmdline_args.users != 'none'
+    full_users_info = cmdline_args.users == 'full'
+    update_messages = cmdline_args.messages != 'none'
+    all_messages = cmdline_args.messages == 'all'
     try:
         session_name = session_data['session']
     except KeyError as e:
@@ -690,21 +1042,25 @@ async def process_session(
             else:
                 async with handler:
                     channels_df = await handler.get_all_channels_frame(
-                            full_info=True)
+                            full_info=full_channels_info)
                     try:
                         async with asyncio.TaskGroup() as tg:
-                            tg.create_task(updater.update_channels(
-                                    handler=handler,
-                                    channels_df=channels_df))
-                            tg.create_task(updater.update_users(
-                                    handler=handler,
-                                    channels_df=channels_df,
-                                    full_info=False))
-                            tg.create_task(updater.update_messages(
-                                    handler=handler,
-                                    channels_df=channels_df,
-                                    all_messages=True,
-                                    all_messages_limit=3000))
+                            if update_channels:
+                                tg.create_task(updater.update_channels(
+                                        handler=handler,
+                                        channels_df=channels_df))
+                            if update_users:
+                                tg.create_task(updater.update_users(
+                                        handler=handler,
+                                        channels_df=channels_df,
+                                        full_info=full_users_info))
+                            if update_messages:
+                                tg.create_task(updater.update_messages(
+                                        handler=handler,
+                                        channels_df=channels_df,
+                                        all_messages=all_messages,
+                                        all_messages_limit=(
+                                            cmdline_args.limit_messages)))
                     except* aiosqlite.Error as e_group:
                         for e in e_group.exceptions:
                             tb = e.__traceback__
@@ -722,7 +1078,15 @@ async def process_session(
                                     f'{type(e).__name__}: Cannot update '
                                     f"table {table!r} in the database: {e}.")
 
-async def main() -> None:
+async def main(cmdline_args: argparse.Namespace) -> None:
+    """Entrypoint coroutine that coordinates reading configuration,
+    initializing the database connection and processing concurrently all
+    declared sessions across services.
+    ----------
+    Parameters:
+    cmdline_args: argparse.Namespace
+        Parsed command-line arguments controlling fetch modes and limits.
+    """
     config_fpath = 'config.json'
     database_fpath = 'chexplore.db'
     try:
@@ -742,7 +1106,8 @@ async def main() -> None:
                                         process_session(
                                             updater=db_updater,
                                             service_name=service,
-                                            session_data=session))
+                                            session_data=session,
+                                            cmdline_args=cmdline_args))
                         except KeyError as e:
                             logger.error(
                                     f'{service}: KeyError: Configuration '
@@ -757,4 +1122,55 @@ async def main() -> None:
 
 if __name__ == '__main__':
     from logging_config import root_logger
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(
+            prog='chupdate',
+            description=
+                'Updater for database of channel/group info of messaging '
+                'services. Fetches and upserts info about channels/groups, '
+                'their participants and messages.')
+    parser.add_argument(
+            '-c', '--channels',
+            choices=['none', 'basic', 'full'],
+            default='full',
+            help=
+                'Determine the kind of channel data to fetch: '
+                'none -- do not update the channel table, '
+                'basic -- update the channel table with data from the basic '
+                'columns only, '
+                'full -- update the channel table with data from all the '
+                'columns. '
+                "The default option value is 'full'.")
+    parser.add_argument(
+            '-u', '--users',
+            choices=['none', 'basic', 'full'],
+            default='basic',
+            help=
+                'Determine the kind of user data to fetch: '
+                'none -- do not update the user table, '
+                'basic -- update the user table with data from the basic '
+                'columns only, '
+                'full -- update the user table with data from all the '
+                'columns. '
+                "The default option value is 'basic'.")
+    parser.add_argument(
+            '-m', '--messages',
+            choices=['none', 'new', 'all'],
+            default='new',
+            help=
+                'Determine the kind of message data to fetch: '
+                'none -- do not update the message table, '
+                'new -- update the message table by fetching only new '
+                '(unsaved so far) messages and those of the saved messages '
+                'which have been edited, '
+                'all -- update the message table by fetching all messages '
+                'or the number of messages from each channel determined by '
+                'the option -l, --limit_messages if present. '
+                "The default option value is 'new'.")
+    parser.add_argument(
+            '-l', '--limit_messages',
+            type=int,
+            help=
+                'Determine the limit of message number to be fetched for '
+                "each channel if -m, --messages option value is 'all'.")
+    args = parser.parse_args()
+    asyncio.run(main(cmdline_args=args))
