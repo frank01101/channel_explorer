@@ -29,7 +29,7 @@ Requirements:
 __author__ = 'Franciszek Humieja'
 __copyright__ = 'Copyright (c) 2025 Franciszek Humieja'
 __license__ = 'MIT'
-__version__ = '1.0.0'
+__version__ = '1.0.1'
 
 import asyncio
 import aiosqlite
@@ -757,7 +757,7 @@ class DatabaseUpdater:
                 AND rowid NOT IN ({', '.join('?'*len(upserted_rows))})
                 AND service = ?
                 AND session = ?
-                {f'AND rowid IN ({', '.join('?'*len(rows_within_limit))})'
+                {f"AND rowid IN ({', '.join('?'*len(rows_within_limit))})"
                  if limit else ''}
             '''
         try:
@@ -1123,7 +1123,7 @@ async def main(cmdline_args: argparse.Namespace) -> None:
 if __name__ == '__main__':
     from logging_config import root_logger
     parser = argparse.ArgumentParser(
-            prog='chupdate',
+            prog='chupdate.py',
             description=
                 'Updater for database of channel/group info of messaging '
                 'services. Fetches and upserts info about channels/groups, '
