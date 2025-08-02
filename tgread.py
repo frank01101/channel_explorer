@@ -26,7 +26,7 @@ Requirements:
 __author__ = 'Franciszek Humieja'
 __copyright__ = 'Copyright (c) 2025 Franciszek Humieja'
 __license__ = 'MIT'
-__version__ = '1.1.3'
+__version__ = '1.1.4'
 
 import asyncio
 import logging
@@ -102,7 +102,13 @@ class TelegramReader:
     def __init__(self, session_name: str, api_id: int, api_hash: str):
         self.session_name = session_name
         self.client = TelegramClient(
-                session=session_name, api_id=api_id, api_hash=api_hash)
+                session=session_name,
+                api_id=api_id,
+                api_hash=api_hash,
+                # Fill the 'system_version' argument to prevent from
+                # signing out of your Telegram account notoriously
+                # in some cases.
+                system_version='4.16.30-vxCUSTOM')
         # Telethon's automatic flood wait (24*60*60 means always).
         self.client.flood_sleep_threshold = 24*60*60
         # Number of requests to be passed by the semaphores at once
