@@ -1,6 +1,15 @@
 import logging
 from logging.handlers import RotatingFileHandler
 
+# Custom filter for supressing sleeping messages from
+# telethon.client.users
+class SupressSleepingMessages(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not (
+                record.name == 'telethon.client.users'
+                and record.getMessage().startswith(
+                    ('Sleeping for', 'Sleeping early for')))
+
 # Configuration of logging
 formatter = logging.Formatter(
         '[%(levelname)-8s %(asctime)s] %(name)s: %(message)s')
@@ -10,6 +19,9 @@ rotating_handler = RotatingFileHandler(
         maxBytes=1024*1024,
         backupCount=8)
 rotating_handler.setFormatter(formatter)
+
+# Add filter
+rotating_handler.addFilter(SupressSleepingMessages())
 
 # Configuration of root logger
 root_logger = logging.getLogger()
