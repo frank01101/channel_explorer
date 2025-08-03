@@ -26,7 +26,7 @@ Requirements:
 __author__ = 'Franciszek Humieja'
 __copyright__ = 'Copyright (c) 2025 Franciszek Humieja'
 __license__ = 'MIT'
-__version__ = '1.1.4'
+__version__ = '1.1.5'
 
 import asyncio
 import logging
@@ -432,8 +432,6 @@ class TelegramReader:
         """
         try:
             participants = await self.client.get_participants(entity=dialog)
-            for user in participants:
-                user.channel = await self.client.get_peer_id(peer=dialog)
             try:
                 dialog_id = await self.client.get_peer_id(peer=dialog)
             except Exception as e:
@@ -441,6 +439,8 @@ class TelegramReader:
                         f'{self.session_name}: {type(e).__name__}: '
                         f'Could not retrieve dialog id for given entity.')
                 dialog_id = None
+            for user in participants:
+                user.channel = dialog_id
             logger.info(
                     f'{self.session_name}: Retrieved {len(participants)} '
                     f'out of {participants.total} available participants '

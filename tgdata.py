@@ -24,7 +24,7 @@ Requirements:
 __author__ = 'Franciszek Humieja'
 __copyright__ = 'Copyright (c) 2025 Franciszek Humieja'
 __license__ = 'MIT'
-__version__ = '1.1.4'
+__version__ = '1.1.5'
 
 import pandas as pd
 import asyncio
@@ -631,8 +631,13 @@ class TelegramDataHandler(TelegramReader):
                         users_full_dict.append(user.full_user.to_dict())
                         users_full_dict[-1]['channel'] = channel_id
                         for inside_user in user.users:
-                            users_dict.append(inside_user.to_dict())
-                            users_dict[-1]['channel'] = channel_id
+                            # Save basic user data stored in
+                            # MetaUserFull.users except the user
+                            # 'Telegram' with id = 777000 which
+                            # sometimes occurs here.
+                            if inside_user.id != 777000:
+                                users_dict.append(inside_user.to_dict())
+                                users_dict[-1]['channel'] = channel_id
                     else:
                         wrong_user_types.append(type(user).__name__)
             except TypeError:
